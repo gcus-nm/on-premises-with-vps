@@ -1,0 +1,38 @@
+name: onprem-relay-gateway
+
+services:
+  traefik:
+    image: ${TRAEFIK_IMAGE:-traefik:v3.7.1}
+    command:
+      - --configFile=/etc/traefik/traefik.yml
+    ports:
+      - "${GATEWAY_BIND_IP:-0.0.0.0}:80:80/tcp"
+      - "${GATEWAY_BIND_IP:-0.0.0.0}:443:443/tcp"
+      - "${GATEWAY_BIND_IP:-0.0.0.0}:25565:25565/tcp"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+    networks:
+      - ingress
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  mc-router:
+    image: ${MC_ROUTER_IMAGE:-itzg/mc-router:latest}
+    command:
+      - >-
+        --mapping=${MINECRAFT_VANILLA_HOST:?set MINECRAFT_VANILLA_HOST}=host.docker.internal:${MINECRAFT_VANILLA_HOST_PORT:-41409},${MINECRAFT_HARDCORE_HOST:?set MINECRAFT_HARDCORE_HOST}=host.docker.internal:${MINECRAFT_HARDCORE_HOST_PORT:-41411}
+    expose:
+      - "25565"
+    networks:
+      - ingress
+    restart: unless-stopped
+
+networks:
+  ingress:
+    name: onprem-relay-ingress

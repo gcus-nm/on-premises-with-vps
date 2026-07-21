@@ -67,6 +67,11 @@ resource "oci_core_instance" "relay" {
   }
 
   lifecycle {
+    # The image data source intentionally selects the newest matching Ubuntu
+    # image for new instances. Ignore later image releases for an existing VM
+    # so routine changes do not produce an unrelated source_id update.
+    ignore_changes = [source_details[0].source_id]
+
     precondition {
       condition     = var.availability_domain_index < length(data.oci_identity_availability_domains.available.availability_domains)
       error_message = "availability_domain_index is outside the availability domains returned for this region."

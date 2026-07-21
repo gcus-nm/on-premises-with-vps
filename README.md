@@ -32,7 +32,9 @@ OCIはインターネットからの通信受付とパケット転送だけを�
 - IPv4/IPv6パケット転送の有効化
 - 月次予算と実費発生時のメールアラート（通知先を設定した場合）
 
-この段階では、WireGuardの秘密鍵、ピア設定、DNSレコード、実際のポート転送ルールは作成しません。これらはオンプレミス側のネットワーク構成と公開したいサービスが決まってから追加します。
+Terraform適用直後の段階では、WireGuardの秘密鍵、Peer設定、DNSレコード、実際のポート転送ルールは作成しません。WireGuardの初期化とPeer管理には、設定ファイルを直接編集せずに操作できる管理スクリプトを使用します。詳しい手順は[WireGuard中継の管理](WIREGUARD.md)を参照してください。
+
+Windows Docker DesktopでTraefikとmc-routerを入口として使用し、OCIからTCP/UDPを転送する手順は[Docker入口とゲームポート転送](GATEWAY.md)を参照してください。
 
 ## 無料枠についての注意
 
@@ -282,6 +284,16 @@ SSHできない場合は次を確認してください。
 | `budget_alert_recipients` | `[]` | 通知先メールアドレス。空なら予算管理を無効化 |
 
 ## 次の段階: WireGuardトンネルの構築
+
+設定ファイルを直接編集せずに、OCIの初期化とPeerの追加・更新・削除を行えます。
+
+```sh
+./scripts/wg-relay.sh install
+./scripts/wg-relay.sh init
+./scripts/wg-relay.sh add windows-minibox --address 10.99.0.2/32
+```
+
+Windowsへインポートする設定は`generated/wireguard/windows-minibox.conf`へ作成されます。このファイルにはWindows側秘密鍵が含まれ、Git管理対象外です。詳細は[WIREGUARD.md](WIREGUARD.md)を確認してください。
 
 OCI環境の作成後は、次の順番で実装します。
 

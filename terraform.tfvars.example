@@ -18,7 +18,9 @@ ssh_ingress_cidrs = ["203.0.113.10/32"]
 
 # UDP/51820 is opened automatically for WireGuard. Add only the service ports
 # that the VPS will later forward over the tunnel to the on-premises server.
-public_tcp_ports = [80, 443]
+# Start with Minecraft only. Add 80/443 when the Web gateway is ready, and add
+# each game's TCP ports only when its container and relay forwarding are ready.
+public_tcp_ports = [25565]
 public_udp_ports = []
 
 # Restrict this to client CIDRs when the service is not intentionally public.

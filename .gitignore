@@ -1,6 +1,9 @@
 # Local .terraform directories
 .terraform/
 
+# macOS metadata
+.DS_Store
+
 # .tfstate files
 *.tfstate
 *.tfstate.*
@@ -31,6 +34,12 @@ override.tf.json
 
 # Include tfplan files to ignore the plan output of command: terraform plan -out=tfplan
 tfplan*
+
+# Generated WireGuard client configurations contain private keys.
+generated/wireguard/
+
+# Local gateway hostnames and deployment overrides.
+gateway/.env
 
 # Ignore CLI configuration files
 .terraformrc
