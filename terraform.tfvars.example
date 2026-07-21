@@ -1,0 +1,25 @@
+region           = "ap-tokyo-1" # Must be your OCI home region for Always Free compute.
+tenancy_ocid     = "ocid1.tenancy.oc1..replace-me"
+compartment_ocid = "ocid1.compartment.oc1..replace-me"
+ssh_public_key   = "ssh-ed25519 AAAA... replace-me"
+
+# Budget values use the currency of your OCI rate card. Leave recipients empty
+# to disable the budget resources.
+budget_amount           = 100
+budget_alert_threshold  = 1
+budget_alert_recipients = ["admin@example.com"]
+
+# E2 Micro is an Always Free fixed shape with 1 GB RAM and up to 50 Mbps public
+# internet bandwidth. Change to VM.Standard.A1.Flex only when A1 has capacity.
+instance_shape = "VM.Standard.E2.1.Micro"
+
+# SSH is closed unless you explicitly add a trusted source address.
+ssh_ingress_cidrs = ["203.0.113.10/32"]
+
+# UDP/51820 is opened automatically for WireGuard. Add only the service ports
+# that the VPS will later forward over the tunnel to the on-premises server.
+public_tcp_ports = [80, 443]
+public_udp_ports = []
+
+# Restrict this to client CIDRs when the service is not intentionally public.
+public_ingress_cidrs = ["0.0.0.0/0", "::/0"]
