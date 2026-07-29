@@ -20,6 +20,7 @@ Windows用秘密鍵は追加・更新コマンドの実行中に生成され、S
 - 稼働中のWireGuardへの安全な設定反映
 - OCI OSファイアウォールでWireGuard待受ポートを許可
 - OCIで受けたTCP/UDPをWindowsへDNAT・SNATする転送ルール
+- WireGuard Peer間で許可するプロトコルとポートのACL
 
 スクリプトが管理しないもの:
 
@@ -116,6 +117,13 @@ TCP/UDP転送ルール:
 ./scripts/wg-relay.sh forward status
 ```
 
+Peer間通信ルール:
+
+```bash
+./scripts/wg-relay.sh peer-forward list
+./scripts/wg-relay.sh peer-forward status
+```
+
 Windowsでトンネルを有効にした後、Windows PowerShellから確認します。
 
 ```powershell
@@ -203,3 +211,89 @@ Windowsから`ping 10.99.0.1`がタイムアウトする場合は、まずハン
 ```
 
 `latest handshake`が表示されない場合は、Windows側でトンネルが有効か、OCIのNSGとOSファイアウォールの両方でWireGuardのUDP待受ポートが許可されているかを確認してください。管理スクリプトを更新した直後は、`install`と`init`を再実行するとOSファイアウォール設定も反映されます。既存のPeerと鍵は維持されます。
+
+## MacからWindowsへRDP接続する
+
+Macを`10.99.0.3`、Windowsを`10.99.0.2`としている場合の例です。RDPはWireGuard内だけで転送するため、OCI NSG、自宅ルーター、Windowsの物理LAN側でTCP/3389やUDP/3389を一般公開する必要はありません。
+
+管理スクリプトをOCIへ更新します。この操作だけでは既存ルールを変更しません。
+
+```bash
+./scripts/wg-relay.sh install
+```
+
+MacからWindowsへのRDPをTCPとUDPで許可します。
+
+```bash
+./scripts/wg-relay.sh peer-forward add mac-to-windows-rdp-tcp \
+  --protocol tcp \
+  --source-address 10.99.0.3 \
+  --target-address 10.99.0.2 \
+  --target-port 3389
+
+./scripts/wg-relay.sh peer-forward add mac-to-windows-rdp-udp \
+  --protocol udp \
+  --source-address 10.99.0.3 \
+  --target-address 10.99.0.2 \
+  --target-port 3389
+```
+
+確認:
+
+```bash
+./scripts/wg-relay.sh peer-forward list
+./scripts/wg-relay.sh peer-forward status
+```
+
+今後生成するクライアント設定は、Peer間の経路を含む次の値になります。
+
+```ini
+AllowedIPs = 10.99.0.0/24
+```
+
+すでにMacとWindowsへインポート済みの設定が`10.99.0.1/32`の場合は、両方のWireGuardアプリで`AllowedIPs`を`10.99.0.0/24`へ変更してトンネルを再度有効にします。サーバー側のPeer設定や鍵の変更は不要です。
+
+Windows 11 Proでリモートデスクトップを有効にし、管理者PowerShellでWireGuard上のMacだけを許可します。
+
+```powershell
+New-NetFirewallRule `
+  -DisplayName "RDP over WireGuard TCP" `
+  -Direction Inbound -Action Allow `
+  -Protocol TCP -LocalPort 3389 `
+  -RemoteAddress 10.99.0.3 -Profile Any
+
+New-NetFirewallRule `
+  -DisplayName "RDP over WireGuard UDP" `
+  -Direction Inbound -Action Allow `
+  -Protocol UDP -LocalPort 3389 `
+  -RemoteAddress 10.99.0.3 -Profile Any
+```
+
+MacからTCP到達性を確認します。
+
+```bash
+nc -vz 10.99.0.2 3389
+```
+
+到達できたら、MacのRDPクライアントで`10.99.0.2`へ接続します。
+
+ルールの転送先などを変更する場合は`update`を使用します。削除時は確認が表示されます。
+
+```bash
+./scripts/wg-relay.sh peer-forward update mac-to-windows-rdp-tcp \
+  --protocol tcp \
+  --source-address 10.99.0.3 \
+  --target-address 10.99.0.2 \
+  --target-port 3389
+
+./scripts/wg-relay.sh peer-forward delete mac-to-windows-rdp-tcp
+./scripts/wg-relay.sh peer-forward delete mac-to-windows-rdp-udp
+```
+
+Peer間通信ルールはOCIの次の場所へ保存され、WireGuardやVMの再起動、通常のポート転送更新後も`firewall-sync`によって再適用されます。
+
+```text
+/etc/wireguard/relay.d/peer-forwards/<ルール名>.conf
+```
+
+Peer間通信ルールから参照中のPeerは削除できません。先に該当する`peer-forward`を削除してください。

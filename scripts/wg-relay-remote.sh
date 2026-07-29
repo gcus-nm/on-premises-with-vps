@@ -7,6 +7,7 @@ readonly WG_DIR="/etc/wireguard"
 readonly STATE_DIR="${WG_DIR}/relay.d"
 readonly PEER_DIR="${STATE_DIR}/peers"
 readonly FORWARD_DIR="${STATE_DIR}/forwards"
+readonly PEER_FORWARD_DIR="${STATE_DIR}/peer-forwards"
 readonly SETTINGS_FILE="${STATE_DIR}/settings"
 readonly PRIVATE_KEY_FILE="${WG_DIR}/private.key"
 readonly PUBLIC_KEY_FILE="${WG_DIR}/public.key"
@@ -42,6 +43,11 @@ Usage:
   wg-relay forward delete NAME
   wg-relay forward list
   wg-relay forward status
+  wg-relay peer-forward add NAME --protocol tcp|udp --source-address IPV4 --target-address IPV4 --target-port PORT
+  wg-relay peer-forward update NAME --protocol tcp|udp --source-address IPV4 --target-address IPV4 --target-port PORT
+  wg-relay peer-forward delete NAME
+  wg-relay peer-forward list
+  wg-relay peer-forward status
 
 add and update print an importable WireGuard client configuration to stdout.
 All status messages are written to stderr.
@@ -279,8 +285,8 @@ remove_chain() {
 }
 
 firewall_sync() {
-  local listen_port server_address relay_address interface_name forward_file
-  local protocol public_port target_address target_port
+  local listen_port server_address relay_address interface_name forward_file peer_forward_file
+  local protocol public_port source_address target_address target_port peer_forward_name
 
   ensure_initialized
   listen_port="$(read_setting LISTEN_PORT)"
@@ -315,6 +321,24 @@ firewall_sync() {
     iptables -w -t nat -A "${FORWARD_POSTROUTING_CHAIN}" \
       -o wg0 -p "${protocol}" -d "${target_address}" --dport "${target_port}" \
       -j SNAT --to-source "${relay_address}"
+  done
+
+  for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
+    [ -f "${peer_forward_file}" ] || continue
+    peer_forward_name="$(basename "${peer_forward_file}" .conf)"
+    protocol="$(read_forward_setting PROTOCOL "${peer_forward_file}")"
+    source_address="$(read_forward_setting SOURCE_ADDRESS "${peer_forward_file}")"
+    target_address="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
+    target_port="$(read_forward_setting TARGET_PORT "${peer_forward_file}")"
+
+    iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" \
+      -i wg0 -o wg0 -p "${protocol}" -s "${source_address}" -d "${target_address}" --dport "${target_port}" \
+      -m conntrack --ctstate NEW,ESTABLISHED \
+      -m comment --comment "peer-forward:${peer_forward_name}" -j ACCEPT
+    iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" \
+      -i wg0 -o wg0 -p "${protocol}" -s "${target_address}" -d "${source_address}" \
+      -m conntrack --ctstate RELATED,ESTABLISHED \
+      -m comment --comment "peer-forward:${peer_forward_name}:return" -j ACCEPT
   done
 
   iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" -j RETURN
@@ -365,10 +389,15 @@ check_address_available() {
   done
 }
 
-server_client_allowed_ip() {
+client_allowed_ips() {
   local server_address
   server_address="$(read_setting SERVER_ADDRESS)"
-  printf '%s/32\n' "${server_address%/*}"
+  python3 - "${server_address}" <<'PY'
+import ipaddress
+import sys
+
+print(ipaddress.ip_interface(sys.argv[1]).network)
+PY
 }
 
 write_client_config() {
@@ -386,7 +415,7 @@ Address = ${client_address}
 [Peer]
 PublicKey = ${server_public_key}
 Endpoint = ${endpoint}
-AllowedIPs = $(server_client_allowed_ip)
+AllowedIPs = $(client_allowed_ips)
 PersistentKeepalive = 25
 EOF
 }
@@ -395,7 +424,7 @@ apply_peer() {
   local mode="$1"
   local name="$2"
   local address="$3"
-  local peer_file client_private_key client_public_key temporary_peer backup_peer action_label
+  local peer_file client_private_key client_public_key temporary_peer backup_peer action_label existing_peer_address
 
   ensure_initialized
   validate_name "${name}"
@@ -409,6 +438,12 @@ apply_peer() {
   fi
   if [ "${mode}" = "update" ] && [ ! -e "${peer_file}" ]; then
     die "peer does not exist: ${name}"
+  fi
+  if [ "${mode}" = "update" ]; then
+    existing_peer_address="$(awk -F'= ' '/^AllowedIPs = / { print $2; exit }' "${peer_file}")"
+    if [ "${existing_peer_address}" != "${address}" ]; then
+      ensure_peer_address_not_referenced "${existing_peer_address}"
+    fi
   fi
 
   client_private_key="$(wg genkey)"
@@ -456,12 +491,14 @@ apply_peer() {
 
 delete_peer() {
   local name="$1"
-  local peer_file backup_peer
+  local peer_file backup_peer peer_address
 
   ensure_initialized
   validate_name "${name}"
   peer_file="${PEER_DIR}/${name}.conf"
   [ -e "${peer_file}" ] || die "peer does not exist: ${name}"
+  peer_address="$(awk -F'= ' '/^AllowedIPs = / { print $2; exit }' "${peer_file}")"
+  ensure_peer_address_not_referenced "${peer_address}"
 
   backup_peer="$(mktemp "${PEER_DIR}/.${name}.backup.XXXXXX")"
   cp "${peer_file}" "${backup_peer}"
@@ -666,6 +703,228 @@ forward_command() {
   esac
 }
 
+ensure_registered_peer_address() {
+  local address="$1"
+  local peer_file peer_address
+
+  for peer_file in "${PEER_DIR}"/*.conf; do
+    [ -f "${peer_file}" ] || continue
+    peer_address="$(awk -F'= ' '/^AllowedIPs = / { print $2; exit }' "${peer_file}")"
+    if [ "${peer_address}" = "${address}/32" ]; then
+      return 0
+    fi
+  done
+  die "peer address is not registered: ${address}"
+}
+
+ensure_peer_address_not_referenced() {
+  local address="${1%/*}"
+  local peer_forward_file source_address target_address peer_forward_name
+
+  for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
+    [ -f "${peer_forward_file}" ] || continue
+    source_address="$(read_forward_setting SOURCE_ADDRESS "${peer_forward_file}")"
+    target_address="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
+    if [ "${source_address}" = "${address}" ] || [ "${target_address}" = "${address}" ]; then
+      peer_forward_name="$(basename "${peer_forward_file}" .conf)"
+      die "peer address is referenced by peer-forward ${peer_forward_name}; delete that rule first"
+    fi
+  done
+}
+
+check_peer_forward_available() {
+  local protocol="$1"
+  local source_address="$2"
+  local target_address="$3"
+  local target_port="$4"
+  local excluded_name="${5:-}"
+  local peer_forward_file existing_name existing_protocol existing_source existing_target existing_port
+
+  for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
+    [ -f "${peer_forward_file}" ] || continue
+    existing_name="$(basename "${peer_forward_file}" .conf)"
+    [ "${existing_name}" = "${excluded_name}" ] && continue
+    existing_protocol="$(read_forward_setting PROTOCOL "${peer_forward_file}")"
+    existing_source="$(read_forward_setting SOURCE_ADDRESS "${peer_forward_file}")"
+    existing_target="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
+    existing_port="$(read_forward_setting TARGET_PORT "${peer_forward_file}")"
+    if [ "${existing_protocol}" = "${protocol}" ] &&
+      [ "${existing_source}" = "${source_address}" ] &&
+      [ "${existing_target}" = "${target_address}" ] &&
+      [ "${existing_port}" = "${target_port}" ]; then
+      die "the same peer-forward is already assigned to ${existing_name}"
+    fi
+  done
+}
+
+apply_peer_forward() {
+  local mode="$1"
+  local name="$2"
+  shift 2
+  local protocol=""
+  local source_address=""
+  local target_address=""
+  local target_port=""
+  local peer_forward_file temporary_file backup_file action_label
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --protocol)
+        [ "$#" -ge 2 ] || die "--protocol requires a value"
+        protocol="$2"
+        shift 2
+        ;;
+      --source-address)
+        [ "$#" -ge 2 ] || die "--source-address requires a value"
+        source_address="$2"
+        shift 2
+        ;;
+      --target-address)
+        [ "$#" -ge 2 ] || die "--target-address requires a value"
+        target_address="$2"
+        shift 2
+        ;;
+      --target-port)
+        [ "$#" -ge 2 ] || die "--target-port requires a value"
+        target_port="$2"
+        shift 2
+        ;;
+      *) die "unknown peer-forward option: $1" ;;
+    esac
+  done
+
+  ensure_initialized
+  validate_name "${name}"
+  [ -n "${protocol}" ] || die "--protocol is required"
+  [ -n "${source_address}" ] || die "--source-address is required"
+  [ -n "${target_address}" ] || die "--target-address is required"
+  [ -n "${target_port}" ] || die "--target-port is required"
+  validate_protocol "${protocol}"
+  validate_target_address "${source_address}"
+  validate_target_address "${target_address}"
+  [ "${source_address}" != "${target_address}" ] || die "source and target addresses must differ"
+  validate_port "${target_port}"
+  ensure_registered_peer_address "${source_address}"
+  ensure_registered_peer_address "${target_address}"
+  check_peer_forward_available "${protocol}" "${source_address}" "${target_address}" "${target_port}" "${name}"
+
+  peer_forward_file="${PEER_FORWARD_DIR}/${name}.conf"
+  if [ "${mode}" = "add" ] && [ -e "${peer_forward_file}" ]; then
+    die "peer-forward already exists: ${name}"
+  fi
+  if [ "${mode}" = "update" ] && [ ! -e "${peer_forward_file}" ]; then
+    die "peer-forward does not exist: ${name}"
+  fi
+
+  temporary_file="$(mktemp "${PEER_FORWARD_DIR}/.${name}.XXXXXX")"
+  backup_file=""
+  {
+    printf 'PROTOCOL=%s\n' "${protocol}"
+    printf 'SOURCE_ADDRESS=%s\n' "${source_address}"
+    printf 'TARGET_ADDRESS=%s\n' "${target_address}"
+    printf 'TARGET_PORT=%s\n' "${target_port}"
+  } >"${temporary_file}"
+
+  if [ -e "${peer_forward_file}" ]; then
+    backup_file="$(mktemp "${PEER_FORWARD_DIR}/.${name}.backup.XXXXXX")"
+    cp "${peer_forward_file}" "${backup_file}"
+  fi
+  install -o root -g root -m 0600 "${temporary_file}" "${peer_forward_file}"
+  rm -f "${temporary_file}"
+
+  if ! firewall_sync; then
+    log "peer-forward change failed; restoring the previous configuration"
+    if [ -n "${backup_file}" ]; then
+      install -o root -g root -m 0600 "${backup_file}" "${peer_forward_file}"
+    else
+      rm -f "${peer_forward_file}"
+    fi
+    firewall_sync || true
+    rm -f "${backup_file}"
+    die "could not apply peer-forward change"
+  fi
+
+  rm -f "${backup_file}"
+  if [ "${mode}" = "add" ]; then
+    action_label="added"
+  else
+    action_label="updated"
+  fi
+  log "${action_label} peer-forward ${name}: ${source_address} -> ${target_address} ${protocol}/${target_port}"
+}
+
+delete_peer_forward() {
+  local name="$1"
+  local peer_forward_file backup_file
+
+  ensure_initialized
+  validate_name "${name}"
+  peer_forward_file="${PEER_FORWARD_DIR}/${name}.conf"
+  [ -e "${peer_forward_file}" ] || die "peer-forward does not exist: ${name}"
+
+  backup_file="$(mktemp "${PEER_FORWARD_DIR}/.${name}.backup.XXXXXX")"
+  cp "${peer_forward_file}" "${backup_file}"
+  rm -f "${peer_forward_file}"
+
+  if ! firewall_sync; then
+    log "peer-forward deletion failed; restoring the previous configuration"
+    install -o root -g root -m 0600 "${backup_file}" "${peer_forward_file}"
+    firewall_sync || true
+    rm -f "${backup_file}"
+    die "could not delete peer-forward"
+  fi
+
+  rm -f "${backup_file}"
+  log "deleted peer-forward ${name}"
+}
+
+list_peer_forwards() {
+  local peer_forward_file name protocol source_address target_address target_port
+  ensure_initialized
+  printf 'NAME\tPROTOCOL\tSOURCE\tTARGET\n'
+  for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
+    [ -f "${peer_forward_file}" ] || continue
+    name="$(basename "${peer_forward_file}" .conf)"
+    protocol="$(read_forward_setting PROTOCOL "${peer_forward_file}")"
+    source_address="$(read_forward_setting SOURCE_ADDRESS "${peer_forward_file}")"
+    target_address="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
+    target_port="$(read_forward_setting TARGET_PORT "${peer_forward_file}")"
+    printf '%s\t%s\t%s\t%s:%s\n' "${name}" "${protocol}" "${source_address}" "${target_address}" "${target_port}"
+  done
+}
+
+peer_forward_status() {
+  list_peer_forwards
+  printf '\nFilter rules:\n'
+  iptables -w -t filter -S "${FORWARD_FILTER_CHAIN}" 2>/dev/null |
+    grep -F 'peer-forward:' || printf '(not applied)\n'
+}
+
+peer_forward_command() {
+  local operation="${1:-}"
+  shift || true
+
+  case "${operation}" in
+    add | update)
+      [ "$#" -ge 1 ] || die "peer-forward ${operation} requires NAME"
+      apply_peer_forward "${operation}" "$@"
+      ;;
+    delete)
+      [ "$#" -eq 1 ] || die "usage: wg-relay peer-forward delete NAME"
+      delete_peer_forward "$1"
+      ;;
+    list)
+      [ "$#" -eq 0 ] || die "usage: wg-relay peer-forward list"
+      list_peer_forwards
+      ;;
+    status)
+      [ "$#" -eq 0 ] || die "usage: wg-relay peer-forward status"
+      peer_forward_status
+      ;;
+    *) die "usage: wg-relay peer-forward add|update|delete|list|status ..." ;;
+  esac
+}
+
 init_relay() {
   local server_address=""
   local listen_port=""
@@ -704,7 +963,7 @@ init_relay() {
     die "${WG_CONFIG} exists and is not managed by wg-relay"
   fi
 
-  install -d -m 0700 "${STATE_DIR}" "${PEER_DIR}" "${FORWARD_DIR}"
+  install -d -m 0700 "${STATE_DIR}" "${PEER_DIR}" "${FORWARD_DIR}" "${PEER_FORWARD_DIR}"
   ensure_server_keys
   temporary_settings="$(mktemp "${STATE_DIR}/.settings.XXXXXX")"
   {
@@ -763,7 +1022,7 @@ main() {
       ;;
   esac
 
-  install -d -m 0700 "${STATE_DIR}" "${PEER_DIR}" "${FORWARD_DIR}"
+  install -d -m 0700 "${STATE_DIR}" "${PEER_DIR}" "${FORWARD_DIR}" "${PEER_FORWARD_DIR}"
   exec 9>"${LOCK_FILE}"
   flock -x 9
 
@@ -799,6 +1058,9 @@ main() {
       ;;
     forward)
       forward_command "$@"
+      ;;
+    peer-forward)
+      peer_forward_command "$@"
       ;;
     *)
       usage >&2

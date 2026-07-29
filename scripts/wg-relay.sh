@@ -35,6 +35,11 @@ Usage:
   ./scripts/wg-relay.sh forward delete NAME [--yes]
   ./scripts/wg-relay.sh forward list
   ./scripts/wg-relay.sh forward status
+  ./scripts/wg-relay.sh peer-forward add NAME --protocol tcp|udp --source-address IPV4 --target-address IPV4 --target-port PORT
+  ./scripts/wg-relay.sh peer-forward update NAME --protocol tcp|udp --source-address IPV4 --target-address IPV4 --target-port PORT
+  ./scripts/wg-relay.sh peer-forward delete NAME [--yes]
+  ./scripts/wg-relay.sh peer-forward list
+  ./scripts/wg-relay.sh peer-forward status
 
 Environment:
   WG_RELAY_SSH_HOST  SSH config host used for the relay (default: oci-relay)
@@ -217,6 +222,40 @@ forward_remote() {
   esac
 }
 
+peer_forward_remote() {
+  local operation="${1:-}"
+  shift || true
+  local name confirmed reply
+
+  case "${operation}" in
+    add | update)
+      [ "$#" -ge 1 ] || die "peer-forward ${operation} requires NAME"
+      remote_command peer-forward "${operation}" "$@"
+      ;;
+    delete)
+      name="${1:-}"
+      confirmed="${2:-}"
+      [ -n "${name}" ] || die "peer-forward delete requires NAME"
+      [ "$#" -le 2 ] || die "usage: ./scripts/wg-relay.sh peer-forward delete NAME [--yes]"
+      if [ "${confirmed}" != "--yes" ]; then
+        [ -t 0 ] || die "non-interactive deletion requires --yes"
+        printf 'Delete peer forward %s? [y/N] ' "${name}" >&2
+        read -r reply
+        case "${reply}" in
+          y | Y | yes | YES) ;;
+          *) log "deletion cancelled"; exit 0 ;;
+        esac
+      fi
+      remote_command peer-forward delete "${name}"
+      ;;
+    list | status)
+      [ "$#" -eq 0 ] || die "peer-forward ${operation} does not accept arguments"
+      remote_command peer-forward "${operation}"
+      ;;
+    *) die "usage: ./scripts/wg-relay.sh peer-forward add|update|delete|list|status ..." ;;
+  esac
+}
+
 main() {
   local command_name="${1:-help}"
   shift || true
@@ -246,6 +285,9 @@ main() {
       ;;
     forward)
       forward_remote "$@"
+      ;;
+    peer-forward)
+      peer_forward_remote "$@"
       ;;
     *)
       usage >&2
