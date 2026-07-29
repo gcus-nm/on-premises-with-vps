@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [ValidateSet("set", "remove", "list")]
@@ -137,7 +137,7 @@ switch ($Command) {
             -Value $Backend `
             -Force
         Write-RouteConfig -Config $config -Path $RoutesFile
-        Write-Host "$actionしました: $normalizedHostname -> $Backend"
+        Write-Host "${action}しました: $normalizedHostname -> $Backend"
     }
 
     "remove" {

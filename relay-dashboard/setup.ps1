@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$OciConfigPath = (Join-Path $env:USERPROFILE ".oci\config"),
     [string]$OciPrivateKeyPath = "",
