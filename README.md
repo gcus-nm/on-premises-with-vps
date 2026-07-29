@@ -31,16 +31,22 @@ OCIはインターネットからの通信受付とパケット転送だけを�
 - WireGuard、nftablesのインストール
 - IPv4/IPv6パケット転送の有効化
 - 月次予算と実費発生時のメールアラート（通知先を設定した場合）
+- 週次の増分ブートボリュームバックアップ（既定で14日保持）
+- 選択したブートボリュームバックアップからVMを作り直す明示的な障害復旧モード
 
 Terraform適用直後の段階では、WireGuardの秘密鍵、Peer設定、DNSレコード、実際のポート転送ルールは作成しません。WireGuardの初期化とPeer管理には、設定ファイルを直接編集せずに操作できる管理スクリプトを使用します。詳しい手順は[WireGuard中継の管理](WIREGUARD.md)を参照してください。
 
-Windows Docker DesktopでTraefikとmc-routerを入口として使用し、OCIからTCP/UDPを転送する手順は[Docker入口とゲームポート転送](GATEWAY.md)を参照してください。
+Windows Docker DesktopでTraefikとmc-routerを入口として使用し、OCIからTCP/UDPを転送する手順は[Docker入口とゲームポート転送](GATEWAY.md)を参照してください。Minecraftのホスト名マッピングは`scripts/mc-route.ps1`で追加・更新・削除でき、mc-routerが変更を自動的に再読み込みします。
+
+OCI公開ポートとWireGuard転送経路をブラウザから管理する場合は[OCI Relay Control](relay-dashboard/README.md)を使用できます。MiniPCのDocker Desktop上で動作し、安全性を検査したTerraform planを確認してから適用します。
+
+VM内部を週次バックアップし、障害時に復旧する手順は[OCIブートボリュームのバックアップと復旧](BACKUP.md)を参照してください。
 
 ## 無料枠についての注意
 
 OCIの[Always Free公式ドキュメント](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)では、`VM.Standard.E2.1.Micro`は最大2台、Ampere A1はテナンシー全体で合計2 OCPU・メモリ12 GiB相当が無料枠です。ブロックボリュームはテナンシー全体で合計200 GBまでです。
 
-この構成は、既定でE2 Micro 1台とブートボリューム50 GiBを使用します。ただし、同じテナンシーで既に無料枠を使っている場合、上限を超えたり有料になったりする可能性があります。適用前に必ずTerraformのplanとOCIコンソールの利用状況を確認してください。
+この構成は、既定でE2 Micro 1台、ブートボリューム50 GiB、週次バックアップを使用します。Always Freeにはテナンシー全体で5件のボリュームバックアップが含まれますが、同じテナンシーで既に無料枠を使っている場合、上限を超えたり有料になったりする可能性があります。適用前に必ずTerraformのplanとOCIコンソールの利用状況を確認してください。
 
 Always FreeのComputeインスタンスは、Oracleが定める低稼働状態が続くと回収される可能性があります。通信量の少ない中継サーバーは条件に該当する可能性があるため、高可用性が必要な本番用途ではこの点を許容できるか検討してください。
 
@@ -199,6 +205,8 @@ planでは、特に次の項目を確認してください。
 - ブートボリュームが50 GiBであること
 - 意図しない有料リソースが含まれていないこと
 - 予算額・実費アラートしきい値・通知先が正しいこと
+- ブートボリュームのバックアップ保持期間と実行曜日・時刻が正しいこと
+- `restore_boot_volume_backup`を設定していない通常時にVMの置換が含まれないこと
 - SSHが意図した送信元CIDRだけに許可されていること
 - 公開TCP/UDPポートが必要最小限であること
 
@@ -276,9 +284,16 @@ SSHできない場合は次を確認してください。
 | `wireguard_port` | `51820` | WireGuardの待受UDPポート |
 | `public_tcp_ports` | `[]` | 後からオンプレミスへ転送するTCPポート |
 | `public_udp_ports` | `[]` | 後からオンプレミスへ転送するUDPポート |
+| `dashboard_public_tcp_ports` | `[]` | 管理画面がplan時に渡すTCPポート。通常は直接設定しない |
+| `dashboard_public_udp_ports` | `[]` | 管理画面がplan時に渡すUDPポート。通常は直接設定しない |
 | `public_ingress_cidrs` | IPv4/IPv6全体 | WireGuard・公開サービスへ接続できる送信元 |
 | `ssh_ingress_cidrs` | `[]` | SSHを許可する管理元。空ならSSHは閉鎖 |
 | `image_ocid` | `null` | Ubuntuイメージの自動選択を上書きする場合に指定 |
+| `enable_boot_volume_backups` | `true` | 週次ブートボリュームバックアップの有効化 |
+| `boot_volume_backup_retention_days` | `14` | 週次バックアップの保持日数（7〜28日） |
+| `boot_volume_backup_day_of_week` | `MONDAY` | バックアップを開始する曜日 |
+| `boot_volume_backup_hour` | `3` | リージョンのデータセンター時刻での開始時刻 |
+| `restore_boot_volume_backup` | `null` | 障害復旧時に使用するバックアップOCIDとVM置換確認 |
 | `budget_amount` | `100` | 月次予算。OCIの請求通貨単位 |
 | `budget_alert_threshold` | `1` | 実費アラートを送る金額。OCIの請求通貨単位 |
 | `budget_alert_recipients` | `[]` | 通知先メールアドレス。空なら予算管理を無効化 |
@@ -294,6 +309,8 @@ SSHできない場合は次を確認してください。
 ```
 
 Windowsへインポートする設定は`generated/wireguard/windows-minibox.conf`へ作成されます。このファイルにはWindows側秘密鍵が含まれ、Git管理対象外です。詳細は[WIREGUARD.md](WIREGUARD.md)を確認してください。
+
+MacからWindowsへのRDPなど、WireGuard Peer間で必要な通信だけを許可する場合は`peer-forward`を使用します。RDPの例とクライアント側経路の設定は[MacからWindowsへRDP接続する](WIREGUARD.md#macからwindowsへrdp接続する)を参照してください。
 
 OCI環境の作成後は、次の順番で実装します。
 
@@ -317,4 +334,4 @@ terraform plan -destroy
 terraform destroy
 ```
 
-このスタックが管理するVM、ネットワーク、予約済みIPv4アドレスも削除されます。必要なデータがVM内に残っていないことを確認してから実行してください。
+このスタックが管理するVM、ネットワーク、予約済みIPv4アドレス、バックアップポリシー、復旧用ブートボリュームも削除されます。必要なデータがVM内に残っていないことを確認してから実行してください。既存のバックアップがOCI側に残る場合もあるため、詳しくは[削除時の注意](BACKUP.md#削除時の注意)を確認してください。

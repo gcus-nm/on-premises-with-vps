@@ -2,6 +2,8 @@
 
 この構成では、OCIをIPv4の公開入口、Windows 11のDocker Desktopをサービス実行環境として使用します。
 
+公開経路を頻繁に追加・更新・削除する場合は、Terraformと`wg-relay forward`をブラウザから一元管理できる[OCI Relay Control](relay-dashboard/README.md)を利用できます。この文書の手動コマンドは、管理画面を使わない場合や障害調査時にも引き続き使用できます。
+
 ```text
 インターネット
   ↓
@@ -23,9 +25,9 @@ WebはTraefikがHTTP Host名で振り分け、Minecraft Javaはmc-routerがMinec
 - TCP/80: Web用Traefik EntryPoint
 - TCP/443: HTTPS用Traefik EntryPoint
 - TCP/25565: Traefikからmc-routerへ転送
-- mc-routerからWindowsホストのTCP/41409とTCP/41411へ転送
+- mc-routerからWindowsホスト上の各Minecraft公開ポートへ転送
 
-Minecraftの既定マッピング:
+Minecraftのマッピング例:
 
 | 接続先ホスト名 | Windowsホスト上の転送先 |
 |---|---:|
@@ -34,25 +36,36 @@ Minecraftの既定マッピング:
 
 ホスト名にはアンダースコアではなくハイフンを使用してください。
 
-## 1. Windowsで環境変数を設定する
+実際のマッピングはGit管理対象外の`gateway/mc-router/routes.json`へ保存します。PowerShell管理コマンドから追加・更新・削除でき、mc-routerが変更を自動的に再読み込みします。
 
-PowerShellで、リポジトリの`gateway`ディレクトリへ移動します。
+この構成では、mc-router公式の[`ROUTES_CONFIG`と`ROUTES_CONFIG_WATCH`](https://github.com/itzg/mc-router#routing-configuration)を使用します。
+
+## 1. Windowsで入口設定を準備する
+
+PowerShellでリポジトリのルートへ移動し、Compose用環境変数を準備します。
 
 ```powershell
-Copy-Item .env.example .env
-notepad .env
+if (-not (Test-Path gateway\.env)) {
+  Copy-Item gateway\.env.example gateway\.env
+}
+notepad gateway\.env
 ```
 
-`.env`のホスト名を実際のMyDNSドメインへ変更します。
+Minecraftのルートを登録します。`set`は、ホスト名が未登録なら追加、登録済みなら転送先を更新します。
 
-```dotenv
-MINECRAFT_VANILLA_HOST=minecraft.example.mydns.jp
-MINECRAFT_VANILLA_HOST_PORT=41409
-MINECRAFT_HARDCORE_HOST=minecraft-hardcore.example.mydns.jp
-MINECRAFT_HARDCORE_HOST_PORT=41411
+```powershell
+.\scripts\mc-route.ps1 set `
+  minecraft.example.mydns.jp `
+  host.docker.internal:41409
+
+.\scripts\mc-route.ps1 set `
+  minecraft-hardcore.example.mydns.jp `
+  host.docker.internal:41411
+
+.\scripts\mc-route.ps1 list
 ```
 
-`.env`はGit管理対象外です。
+`gateway/.env`と`gateway/mc-router/routes.json`はGit管理対象外です。マッピングのJSONを直接編集する必要はありません。
 
 既存MinecraftコンテナがWindowsホストの41409と41411へ公開されていることを確認します。
 
@@ -64,19 +77,55 @@ mc-routerはDocker Desktopの`host.docker.internal`を通して、この2ポー�
 
 ## 2. Windowsで入口コンテナを起動する
 
-`gateway`ディレクトリで実行します。
+リポジトリのルートで実行します。
 
 ```powershell
-docker compose config
-docker compose pull
-docker compose up -d
-docker compose ps
+docker compose --env-file gateway/.env -f gateway/compose.yaml config
+docker compose --env-file gateway/.env -f gateway/compose.yaml pull
+docker compose --env-file gateway/.env -f gateway/compose.yaml up -d
+docker compose --env-file gateway/.env -f gateway/compose.yaml ps
 ```
 
 ログ確認:
 
 ```powershell
-docker compose logs --tail 100 traefik mc-router
+docker compose --env-file gateway/.env -f gateway/compose.yaml logs --tail 100 traefik mc-router
+```
+
+## Minecraftルートを運用する
+
+コンテナ起動後も、同じ管理コマンドでマッピングを変更できます。mc-routerが`routes.json`を監視しているため、通常はコンテナの再起動は不要です。
+
+追加または転送先更新:
+
+```powershell
+.\scripts\mc-route.ps1 set `
+  minecraft-beta.example.mydns.jp `
+  host.docker.internal:41413
+```
+
+一覧:
+
+```powershell
+.\scripts\mc-route.ps1 list
+```
+
+削除:
+
+```powershell
+.\scripts\mc-route.ps1 remove minecraft-beta.example.mydns.jp
+```
+
+変更後はログで再読み込みを確認します。
+
+```powershell
+docker compose --env-file gateway/.env -f gateway/compose.yaml logs --tail 100 mc-router
+```
+
+ファイル監視が反映されない場合に限り、mc-routerを再起動します。
+
+```powershell
+docker compose --env-file gateway/.env -f gateway/compose.yaml restart mc-router
 ```
 
 Windows Defender Firewallで確認を求められた場合は、パブリックネットワーク全体ではなく、WireGuard経由で必要な受信だけを許可してください。
