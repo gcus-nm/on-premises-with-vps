@@ -118,6 +118,75 @@ variable "ubuntu_version" {
   nullable    = true
 }
 
+variable "enable_boot_volume_backups" {
+  description = "Whether to assign the Terraform-managed weekly backup policy to the relay boot volume."
+  type        = bool
+  default     = true
+}
+
+variable "boot_volume_backup_retention_days" {
+  description = "Retention period in days for weekly boot-volume backups. The range is intentionally limited to avoid exhausting the Always Free backup allowance."
+  type        = number
+  default     = 14
+
+  validation {
+    condition = (
+      var.boot_volume_backup_retention_days >= 7 &&
+      var.boot_volume_backup_retention_days <= 28 &&
+      floor(var.boot_volume_backup_retention_days) == var.boot_volume_backup_retention_days
+    )
+    error_message = "boot_volume_backup_retention_days must be an integer from 7 through 28."
+  }
+}
+
+variable "boot_volume_backup_day_of_week" {
+  description = "Day of week on which OCI starts the weekly boot-volume backup."
+  type        = string
+  default     = "MONDAY"
+
+  validation {
+    condition = contains([
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+      "SUNDAY",
+    ], var.boot_volume_backup_day_of_week)
+    error_message = "boot_volume_backup_day_of_week must be an uppercase English weekday name."
+  }
+}
+
+variable "boot_volume_backup_hour" {
+  description = "Hour at which OCI starts the weekly backup, in the region's data-center time zone."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.boot_volume_backup_hour >= 0 && var.boot_volume_backup_hour <= 23 && floor(var.boot_volume_backup_hour) == var.boot_volume_backup_hour
+    error_message = "boot_volume_backup_hour must be an integer from 0 through 23."
+  }
+}
+
+variable "restore_boot_volume_backup" {
+  description = "Disaster-recovery settings. When set, Terraform restores this boot-volume-backup OCID and replaces the managed relay VM. Keep the value configured after recovery."
+  type = object({
+    id                           = string
+    confirm_instance_replacement = bool
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition = var.restore_boot_volume_backup == null ? true : (
+      startswith(var.restore_boot_volume_backup.id, "ocid1.bootvolumebackup.") &&
+      var.restore_boot_volume_backup.confirm_instance_replacement
+    )
+    error_message = "restore_boot_volume_backup.id must be a boot-volume-backup OCID and confirm_instance_replacement must be true."
+  }
+}
+
 variable "vcn_ipv4_cidr" {
   description = "Private IPv4 CIDR for the relay VCN."
   type        = string

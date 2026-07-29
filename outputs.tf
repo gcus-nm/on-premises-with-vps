@@ -1,16 +1,36 @@
 output "instance_id" {
   description = "OCID of the relay compute instance."
-  value       = oci_core_instance.relay.id
+  value       = local.relay_instance_id
 }
 
 output "availability_domain" {
   description = "Availability domain selected for the instance."
-  value       = oci_core_instance.relay.availability_domain
+  value       = local.relay_instance_availability_domain
 }
 
 output "instance_shape" {
   description = "Compute shape selected for the relay."
-  value       = oci_core_instance.relay.shape
+  value       = local.relay_instance_shape
+}
+
+output "boot_volume_id" {
+  description = "OCID of the boot volume currently attached to the relay instance."
+  value       = local.relay_boot_volume_id
+}
+
+output "boot_volume_backup_policy_id" {
+  description = "OCID of the weekly boot-volume backup policy, or null when backups are disabled."
+  value       = try(oci_core_volume_backup_policy.relay[0].id, null)
+}
+
+output "restore_mode_active" {
+  description = "Whether the relay is currently managed from a restored boot volume."
+  value       = local.restore_mode
+}
+
+output "restored_boot_volume_id" {
+  description = "OCID of the Terraform-restored boot volume, or null in normal image mode."
+  value       = try(oci_core_boot_volume.relay_restore[0].id, null)
 }
 
 output "public_ipv4" {
