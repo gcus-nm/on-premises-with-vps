@@ -24,9 +24,11 @@ services:
 
   mc-router:
     image: ${MC_ROUTER_IMAGE:-itzg/mc-router:latest}
-    command:
-      - >-
-        --mapping=${MINECRAFT_VANILLA_HOST:?set MINECRAFT_VANILLA_HOST}=host.docker.internal:${MINECRAFT_VANILLA_HOST_PORT:-41409},${MINECRAFT_HARDCORE_HOST:?set MINECRAFT_HARDCORE_HOST}=host.docker.internal:${MINECRAFT_HARDCORE_HOST_PORT:-41411}
+    environment:
+      ROUTES_CONFIG: /config/routes.json
+      ROUTES_CONFIG_WATCH: "true"
+    volumes:
+      - ./mc-router:/config:ro
     expose:
       - "25565"
     networks:
