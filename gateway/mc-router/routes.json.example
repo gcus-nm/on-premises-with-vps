@@ -1,0 +1,6 @@
+{
+  "mappings": {
+    "minecraft.example.mydns.jp": "host.docker.internal:41409",
+    "minecraft-hardcore.example.mydns.jp": "host.docker.internal:41411"
+  }
+}

@@ -1,0 +1,44 @@
+# Example only. Move this file into ../dynamic after adding matching entryPoints
+# and published ports to gateway/compose.yaml and gateway/traefik/traefik.yml.
+tcp:
+  routers:
+    seven-days-to-die:
+      entryPoints:
+        - seven-days-to-die-tcp
+      rule: HostSNI(`*`)
+      service: seven-days-to-die
+
+  services:
+    seven-days-to-die:
+      loadBalancer:
+        servers:
+          - address: seven-days-to-die:26900
+
+udp:
+  routers:
+    seven-days-to-die-main:
+      entryPoints:
+        - seven-days-to-die-udp-main
+      service: seven-days-to-die-main
+    seven-days-to-die-plus-1:
+      entryPoints:
+        - seven-days-to-die-udp-plus-1
+      service: seven-days-to-die-plus-1
+    seven-days-to-die-plus-2:
+      entryPoints:
+        - seven-days-to-die-udp-plus-2
+      service: seven-days-to-die-plus-2
+
+  services:
+    seven-days-to-die-main:
+      loadBalancer:
+        servers:
+          - address: seven-days-to-die:26900
+    seven-days-to-die-plus-1:
+      loadBalancer:
+        servers:
+          - address: seven-days-to-die:26901
+    seven-days-to-die-plus-2:
+      loadBalancer:
+        servers:
+          - address: seven-days-to-die:26902

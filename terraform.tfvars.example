@@ -1,0 +1,46 @@
+region           = "ap-tokyo-1" # Must be your OCI home region for Always Free compute.
+tenancy_ocid     = "ocid1.tenancy.oc1..replace-me"
+compartment_ocid = "ocid1.compartment.oc1..replace-me"
+ssh_public_key   = "ssh-ed25519 AAAA... replace-me"
+
+# Budget values use the currency of your OCI rate card. Leave recipients empty
+# to disable the budget resources.
+budget_amount           = 100
+budget_alert_threshold  = 1
+budget_alert_recipients = ["admin@example.com"]
+
+# E2 Micro is an Always Free fixed shape with 1 GB RAM and up to 50 Mbps public
+# internet bandwidth. Change to VM.Standard.A1.Flex only when A1 has capacity.
+instance_shape = "VM.Standard.E2.1.Micro"
+
+# OCI creates an incremental boot-volume backup every Monday at 03:00 in the
+# region's data-center time zone and retains it for 14 days.
+enable_boot_volume_backups          = true
+boot_volume_backup_retention_days   = 14
+boot_volume_backup_day_of_week      = "MONDAY"
+boot_volume_backup_hour             = 3
+
+# Disaster recovery only: uncomment this block after selecting an AVAILABLE
+# boot-volume backup. This replaces the currently managed VM. Keep the block
+# configured after recovery; removing it switches back to image mode and
+# replaces the VM again.
+# restore_boot_volume_backup = {
+#   id                           = "ocid1.bootvolumebackup.oc1.ap-tokyo-1...replace-me"
+#   confirm_instance_replacement = true
+# }
+
+# SSH is closed unless you explicitly add a trusted source address.
+ssh_ingress_cidrs = ["203.0.113.10/32"]
+
+# UDP/51820 is opened automatically for WireGuard. Add only the service ports
+# that the VPS will later forward over the tunnel to the on-premises server.
+# Start with Minecraft only. Add 80/443 when the Web gateway is ready, and add
+# each game's TCP ports only when its container and relay forwarding are ready.
+public_tcp_ports = [25565]
+public_udp_ports = []
+
+# dashboard_public_tcp_ports and dashboard_public_udp_ports are intentionally
+# omitted. The relay dashboard passes them through its generated var file.
+
+# Restrict this to client CIDRs when the service is not intentionally public.
+public_ingress_cidrs = ["0.0.0.0/0", "::/0"]

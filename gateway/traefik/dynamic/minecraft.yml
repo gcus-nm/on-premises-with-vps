@@ -1,0 +1,13 @@
+tcp:
+  routers:
+    minecraft:
+      entryPoints:
+        - minecraft
+      rule: HostSNI(`*`)
+      service: minecraft-router
+
+  services:
+    minecraft-router:
+      loadBalancer:
+        servers:
+          - address: mc-router:25565

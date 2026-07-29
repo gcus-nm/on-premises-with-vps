@@ -1,0 +1,46 @@
+name: onprem-relay-control
+
+services:
+  relay-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: onprem-relay-dashboard:local
+    environment:
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:?DASHBOARD_USERNAME is required}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?DASHBOARD_PASSWORD is required}
+      RELAY_SSH_HOST: ${RELAY_SSH_HOST:-oci-relay}
+      RELAY_NETWORK: ${RELAY_NETWORK:-10.99.0.0/24}
+      RELAY_ADDRESS: ${RELAY_ADDRESS:-10.99.0.1}
+    ports:
+      - "${RELAY_DASHBOARD_BIND_IP:-127.0.0.1}:${RELAY_DASHBOARD_PORT:-41800}:8080/tcp"
+    volumes:
+      - ../backup.tf:/workspace/backup.tf:ro
+      - ../budget.tf:/workspace/budget.tf:ro
+      - ../compute.tf:/workspace/compute.tf:ro
+      - ../network.tf:/workspace/network.tf:ro
+      - ../outputs.tf:/workspace/outputs.tf:ro
+      - ../provider.tf:/workspace/provider.tf:ro
+      - ../variables.tf:/workspace/variables.tf:ro
+      - ../versions.tf:/workspace/versions.tf:ro
+      - ../cloud-init.yaml:/workspace/cloud-init.yaml:ro
+      - ../.terraform.lock.hcl:/workspace/.terraform.lock.hcl:ro
+      - ../terraform.tfvars:/workspace/terraform.tfvars:ro
+      - ../scripts/wg-relay.sh:/workspace/scripts/wg-relay.sh:ro
+      - ./secrets/oci:/run/relay-secrets/oci:ro
+      - ./secrets/ssh:/run/relay-secrets/ssh:ro
+      - relay-dashboard-data:/data
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /run/relay-home:size=8m,mode=0700
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+
+volumes:
+  relay-dashboard-data:
+    name: onprem-relay-dashboard-data
