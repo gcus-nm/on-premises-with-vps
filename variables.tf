@@ -242,6 +242,28 @@ variable "public_udp_ports" {
   }
 }
 
+variable "dashboard_public_tcp_ports" {
+  description = "TCP ports managed by the relay dashboard. The dashboard supplies this value through a generated var file; do not set it in terraform.tfvars."
+  type        = set(number)
+  default     = []
+
+  validation {
+    condition     = alltrue([for port in var.dashboard_public_tcp_ports : port >= 1 && port <= 65535 && floor(port) == port])
+    error_message = "Every dashboard-managed TCP port must be an integer from 1 through 65535."
+  }
+}
+
+variable "dashboard_public_udp_ports" {
+  description = "UDP ports managed by the relay dashboard. The dashboard supplies this value through a generated var file; do not set it in terraform.tfvars."
+  type        = set(number)
+  default     = []
+
+  validation {
+    condition     = alltrue([for port in var.dashboard_public_udp_ports : port >= 1 && port <= 65535 && floor(port) == port])
+    error_message = "Every dashboard-managed UDP port must be an integer from 1 through 65535."
+  }
+}
+
 variable "public_ingress_cidrs" {
   description = "IPv4 and IPv6 source CIDRs allowed to reach the WireGuard and additional public ports."
   type        = set(string)

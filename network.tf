@@ -1,8 +1,9 @@
 locals {
-  public_udp_ports = setunion(var.public_udp_ports, toset([var.wireguard_port]))
+  public_tcp_ports = setunion(var.public_tcp_ports, var.dashboard_public_tcp_ports)
+  public_udp_ports = setunion(var.public_udp_ports, var.dashboard_public_udp_ports, toset([var.wireguard_port]))
 
   tcp_ingress_rules = {
-    for pair in setproduct(var.public_tcp_ports, var.public_ingress_cidrs) :
+    for pair in setproduct(local.public_tcp_ports, var.public_ingress_cidrs) :
     "${pair[0]}:${pair[1]}" => {
       port   = pair[0]
       source = pair[1]

@@ -39,5 +39,8 @@ ssh_ingress_cidrs = ["203.0.113.10/32"]
 public_tcp_ports = [25565]
 public_udp_ports = []
 
+# dashboard_public_tcp_ports and dashboard_public_udp_ports are intentionally
+# omitted. The relay dashboard passes them through its generated var file.
+
 # Restrict this to client CIDRs when the service is not intentionally public.
 public_ingress_cidrs = ["0.0.0.0/0", "::/0"]

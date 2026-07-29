@@ -3,6 +3,8 @@
 
 # macOS metadata
 .DS_Store
+__pycache__/
+*.pyc
 
 # .tfstate files
 *.tfstate
@@ -40,6 +42,11 @@ generated/wireguard/
 
 # Local gateway hostnames and deployment overrides.
 gateway/.env
+gateway/mc-router/routes.json
+
+# Relay dashboard credentials and local runtime overrides.
+relay-dashboard/.env
+relay-dashboard/secrets/
 
 # Ignore CLI configuration files
 .terraformrc

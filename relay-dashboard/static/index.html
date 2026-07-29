@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OCI Relay Control</title>
+    <meta
+      name="description"
+      content="OCIリレーからWindows MiniPCへの公開経路を管理するローカルダッシュボード"
+    >
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">RC</span>
+          <div>
+            <p class="eyebrow">ON-PREMISES CONTROL PLANE</p>
+            <h1>OCI Relay Control</h1>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button class="button button-quiet" id="preflight-button" type="button">
+            環境チェック
+          </button>
+          <button class="button button-primary" id="new-route-button" type="button">
+            ＋ 経路を追加
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div class="hero-copy">
+            <p class="eyebrow">PUBLIC TRAFFIC ROUTING</p>
+            <h2>公開ポートを、MiniPCへ安全に届ける。</h2>
+            <p>
+              GUIで経路を定義し、Terraformの安全確認を通してから
+              OCI NSGとWireGuardリレーへ反映します。
+            </p>
+          </div>
+          <div class="topology" aria-label="通信経路">
+            <div class="node">
+              <span class="node-label">CLIENT</span>
+              <strong>Internet</strong>
+              <small>Public TCP / UDP</small>
+            </div>
+            <span class="route-line" aria-hidden="true"></span>
+            <div class="node node-accent">
+              <span class="node-label">RELAY</span>
+              <strong>OCI</strong>
+              <small>161.33.162.42</small>
+            </div>
+            <span class="route-line route-line-secure" aria-hidden="true"></span>
+            <div class="node">
+              <span class="node-label">TARGET</span>
+              <strong>MiniPC</strong>
+              <small>10.99.0.2</small>
+            </div>
+          </div>
+        </section>
+
+        <section class="metrics" aria-label="経路サマリー">
+          <article class="metric">
+            <span>管理中の経路</span>
+            <strong id="metric-total">0</strong>
+            <small>GUI管理ルール</small>
+          </article>
+          <article class="metric">
+            <span>TCP</span>
+            <strong id="metric-tcp">0</strong>
+            <small>公開リスナー</small>
+          </article>
+          <article class="metric">
+            <span>UDP</span>
+            <strong id="metric-udp">0</strong>
+            <small>公開リスナー</small>
+          </article>
+          <article class="metric metric-status">
+            <span>適用状態</span>
+            <strong id="metric-status">未確認</strong>
+            <small id="metric-status-detail">環境チェックを実行してください</small>
+          </article>
+        </section>
+
+        <section class="workspace-grid">
+          <article class="panel routes-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">ROUTE INVENTORY</p>
+                <h2>公開経路</h2>
+              </div>
+              <div class="panel-actions">
+                <button class="button button-quiet" id="relay-status-button" type="button">
+                  リレー状態
+                </button>
+                <button class="button button-plan" id="plan-button" type="button">
+                  変更を確認
+                </button>
+              </div>
+            </div>
+
+            <div class="empty-state" id="empty-state">
+              <span class="empty-symbol" aria-hidden="true">↗</span>
+              <h3>経路はまだ登録されていません</h3>
+              <p>最初の公開ポートとMiniPCの転送先を追加してください。</p>
+              <button class="button button-primary" id="empty-new-route-button" type="button">
+                最初の経路を追加
+              </button>
+            </div>
+
+            <div class="table-wrap" id="routes-table-wrap" hidden>
+              <table>
+                <thead>
+                  <tr>
+                    <th>サービス</th>
+                    <th>プロトコル</th>
+                    <th>OCI公開</th>
+                    <th>MiniPC転送先</th>
+                    <th>説明</th>
+                    <th><span class="sr-only">操作</span></th>
+                  </tr>
+                </thead>
+                <tbody id="routes-body"></tbody>
+              </table>
+            </div>
+          </article>
+
+          <aside class="side-stack">
+            <article class="panel safety-panel">
+              <p class="eyebrow">SAFE APPLY</p>
+              <h2>反映フロー</h2>
+              <ol class="steps">
+                <li>
+                  <span>1</span>
+                  <div><strong>入力検査</strong><small>競合・予約ポートを検出</small></div>
+                </li>
+                <li>
+                  <span>2</span>
+                  <div><strong>Terraform plan</strong><small>NSG以外の変更を自動遮断</small></div>
+                </li>
+                <li>
+                  <span>3</span>
+                  <div><strong>確認して適用</strong><small>APPLY入力後だけ実行</small></div>
+                </li>
+                <li>
+                  <span>4</span>
+                  <div><strong>リレー同期</strong><small>GUI管理ルールだけ更新</small></div>
+                </li>
+              </ol>
+              <button class="button button-full button-quiet" id="sync-button" type="button">
+                リレーだけ再同期
+              </button>
+            </article>
+
+            <article class="panel audit-panel">
+              <div class="panel-heading compact">
+                <div>
+                  <p class="eyebrow">RECENT ACTIVITY</p>
+                  <h2>操作履歴</h2>
+                </div>
+              </div>
+              <div id="audit-list" class="audit-list">
+                <p class="muted">履歴はまだありません。</p>
+              </div>
+            </article>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="route-dialog">
+      <form method="dialog" id="route-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">ROUTE EDITOR</p>
+            <h2 id="route-dialog-title">経路を追加</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="閉じる" type="submit">×</button>
+        </div>
+        <input type="hidden" id="original-name">
+        <label>
+          <span>経路名</span>
+          <input
+            id="route-name"
+            name="name"
+            required
+            maxlength="28"
+            pattern="[a-z0-9][a-z0-9-]{0,27}"
+            placeholder="minecraft"
+            autocomplete="off"
+          >
+          <small>小文字英数字とハイフン。OCIでは「ui-」付きで管理します。</small>
+        </label>
+        <div class="field-grid">
+          <label>
+            <span>プロトコル</span>
+            <select id="route-protocol" name="protocol">
+              <option value="tcp">TCP</option>
+              <option value="udp">UDP</option>
+            </select>
+          </label>
+          <label>
+            <span>OCI公開ポート</span>
+            <input id="route-public-port" name="public_port" type="number" min="1" max="65535" required>
+          </label>
+        </div>
+        <div class="field-grid">
+          <label>
+            <span>転送先アドレス</span>
+            <input id="route-target-address" name="target_address" value="10.99.0.2" required>
+          </label>
+          <label>
+            <span>MiniPCポート</span>
+            <input id="route-target-port" name="target_port" type="number" min="1" max="65535" required>
+          </label>
+        </div>
+        <label>
+          <span>説明</span>
+          <input
+            id="route-description"
+            name="description"
+            maxlength="120"
+            placeholder="Minecraft Java 共通入口"
+          >
+        </label>
+        <p class="form-error" id="route-form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="button button-quiet" value="cancel" type="submit">キャンセル</button>
+          <button class="button button-primary" id="save-route-button" type="button">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="plan-dialog" class="wide-dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">TERRAFORM REVIEW</p>
+          <h2>変更内容の確認</h2>
+        </div>
+        <button class="icon-button" id="close-plan-button" aria-label="閉じる" type="button">×</button>
+      </div>
+      <div id="plan-summary" class="plan-summary"></div>
+      <div id="unexpected-changes" class="danger-box" hidden></div>
+      <details>
+        <summary>Terraform planの詳細</summary>
+        <pre id="plan-output"></pre>
+      </details>
+      <div class="confirm-zone">
+        <label>
+          <span>適用する場合は <code>APPLY</code> と入力</span>
+          <input id="apply-confirmation" autocomplete="off" spellcheck="false">
+        </label>
+        <button class="button button-primary" id="apply-button" type="button" disabled>
+          OCIへ適用
+        </button>
+      </div>
+      <p class="form-error" id="plan-error" role="alert"></p>
+    </dialog>
+
+    <dialog id="info-dialog" class="wide-dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow" id="info-eyebrow">SYSTEM STATUS</p>
+          <h2 id="info-title">状態</h2>
+        </div>
+        <button class="icon-button" id="close-info-button" aria-label="閉じる" type="button">×</button>
+      </div>
+      <div id="info-content"></div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
