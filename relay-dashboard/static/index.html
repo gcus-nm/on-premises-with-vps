@@ -177,7 +177,13 @@
             <p class="eyebrow">ROUTE EDITOR</p>
             <h2 id="route-dialog-title">経路を追加</h2>
           </div>
-          <button class="icon-button" value="cancel" aria-label="閉じる" type="submit">×</button>
+          <button
+            class="icon-button"
+            value="cancel"
+            aria-label="閉じる"
+            type="submit"
+            formnovalidate
+          >×</button>
         </div>
         <input type="hidden" id="original-name">
         <label>
@@ -227,7 +233,12 @@
         </label>
         <p class="form-error" id="route-form-error" role="alert"></p>
         <div class="dialog-actions">
-          <button class="button button-quiet" value="cancel" type="submit">キャンセル</button>
+          <button
+            class="button button-quiet"
+            value="cancel"
+            type="submit"
+            formnovalidate
+          >キャンセル</button>
           <button class="button button-primary" id="save-route-button" type="button">保存</button>
         </div>
       </form>
