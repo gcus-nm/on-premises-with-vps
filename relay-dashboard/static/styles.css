@@ -516,14 +516,20 @@ td.description-cell {
   font-weight: 750;
 }
 
-.state-badge.applied {
+.state-badge.enabled {
   border-color: rgb(133 240 180 / 35%);
   background: rgb(133 240 180 / 7%);
   color: var(--accent);
 }
 
+.state-badge.disabled {
+  color: #8da29a;
+}
+
 .state-badge.pending_create,
 .state-badge.pending_update,
+.state-badge.pending_enable,
+.state-badge.pending_disable,
 .state-badge.pending_delete {
   border-color: rgb(255 200 107 / 35%);
   background: rgb(255 200 107 / 7%);
@@ -579,13 +585,275 @@ td.description-cell {
   opacity: 0.4;
 }
 
-.small-button.restore:hover {
-  border-color: rgb(133 240 180 / 38%);
-  color: var(--accent);
+.route-list-wrap {
+  padding: 18px 22px 24px;
 }
 
-.small-button.delete:hover {
-  border-color: rgb(255 122 134 / 38%);
+.route-collection {
+  display: grid;
+  gap: 14px;
+}
+
+.route-group,
+.single-routes {
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px 4px 10px 4px;
+  background: rgb(7 17 15 / 40%);
+}
+
+.group-header,
+.single-routes-heading {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.25fr) minmax(200px, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  min-height: 72px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.single-routes-heading {
+  grid-template-columns: 1fr;
+}
+
+.group-identity {
+  min-width: 0;
+}
+
+.group-identity strong,
+.single-routes-heading strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 14px;
+}
+
+.group-identity small,
+.group-port-summary,
+.single-routes-heading small {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.collapse-button {
+  min-width: 34px;
+  min-height: 32px;
+  padding: 0;
+}
+
+.route-members {
+  display: grid;
+}
+
+.route-item {
+  display: grid;
+  grid-template-columns:
+    minmax(150px, 1.15fr)
+    64px
+    minmax(84px, 0.7fr)
+    minmax(170px, 1.1fr)
+    minmax(100px, 0.85fr)
+    auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 62px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.route-item:last-child {
+  border-bottom: 0;
+}
+
+.route-item.state-pending_delete,
+.route-item.state-deleted,
+.route-item.state-disabled {
+  background: rgb(0 0 0 / 10%);
+}
+
+.route-main {
+  min-width: 0;
+}
+
+.route-main .route-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.route-main small {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.toggle-button {
+  position: relative;
+  width: 46px;
+  min-width: 46px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #182520;
+}
+
+.toggle-button::before {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #75877f;
+  content: "";
+  transition:
+    left 160ms ease,
+    background 160ms ease;
+}
+
+.toggle-button[data-state="enabled"] {
+  border-color: rgb(133 240 180 / 50%);
+  background: rgb(133 240 180 / 13%);
+}
+
+.toggle-button[data-state="enabled"]::before {
+  left: 24px;
+  background: var(--accent);
+}
+
+.toggle-button[data-state="mixed"] {
+  border-color: rgb(255 200 107 / 48%);
+  background: rgb(255 200 107 / 10%);
+}
+
+.toggle-button[data-state="mixed"]::before {
+  left: 14px;
+  background: var(--warning);
+}
+
+.toggle-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.button-danger {
+  border-color: rgb(255 122 134 / 45%);
+  background: rgb(255 122 134 / 8%);
+  color: var(--danger);
+}
+
+.advanced-zone {
+  padding: 12px;
+  border: 1px solid rgb(255 122 134 / 22%);
+  border-radius: 8px;
+  background: rgb(255 122 134 / 4%);
+}
+
+.advanced-zone summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.advanced-zone p {
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+#group-form {
+  display: grid;
+  gap: 18px;
+}
+
+.group-members-heading {
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  justify-content: space-between;
+}
+
+.group-members-heading h3 {
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.group-members-heading p {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.group-member-rows {
+  display: grid;
+  gap: 10px;
+}
+
+.group-member-row {
+  display: grid;
+  grid-template-columns: 92px minmax(160px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.group-member-row label {
+  display: grid;
+  gap: 6px;
+}
+
+.group-member-row label span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.remove-member-row {
+  min-width: 34px;
+  min-height: 42px;
+  padding: 0;
+}
+
+.port-preview {
+  min-height: 42px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.port-preview.error {
+  border-color: rgb(255 122 134 / 42%);
   color: var(--danger);
 }
 
@@ -1044,6 +1312,35 @@ code {
   .side-stack,
   .field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .group-header {
+    grid-template-columns: 1fr;
+  }
+
+  .group-actions {
+    justify-content: flex-start;
+  }
+
+  .route-item {
+    grid-template-columns: 1fr 64px;
+  }
+
+  .route-item > :not(.route-main, .route-controls) {
+    grid-column: 1 / -1;
+  }
+
+  .route-controls {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .group-member-row {
+    grid-template-columns: 1fr;
+  }
+
+  .remove-member-row {
+    justify-self: end;
   }
 
   .routes-panel .panel-heading {

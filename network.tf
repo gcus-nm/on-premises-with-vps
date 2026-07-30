@@ -2,18 +2,46 @@ locals {
   public_tcp_ports = setunion(var.public_tcp_ports, var.dashboard_public_tcp_ports)
   public_udp_ports = setunion(var.public_udp_ports, var.dashboard_public_udp_ports, toset([var.wireguard_port]))
 
+  tcp_port_ranges = merge(
+    {
+      for port in local.public_tcp_ports : tostring(port) => {
+        min = port
+        max = port
+      }
+    },
+    {
+      for port_range in var.dashboard_public_tcp_port_ranges :
+      port_range.min == port_range.max ? tostring(port_range.min) : "${port_range.min}-${port_range.max}" => port_range
+    }
+  )
+
+  udp_port_ranges = merge(
+    {
+      for port in local.public_udp_ports : tostring(port) => {
+        min = port
+        max = port
+      }
+    },
+    {
+      for port_range in var.dashboard_public_udp_port_ranges :
+      port_range.min == port_range.max ? tostring(port_range.min) : "${port_range.min}-${port_range.max}" => port_range
+    }
+  )
+
   tcp_ingress_rules = {
-    for pair in setproduct(local.public_tcp_ports, var.public_ingress_cidrs) :
+    for pair in setproduct(keys(local.tcp_port_ranges), var.public_ingress_cidrs) :
     "${pair[0]}:${pair[1]}" => {
-      port   = pair[0]
+      min    = local.tcp_port_ranges[pair[0]].min
+      max    = local.tcp_port_ranges[pair[0]].max
       source = pair[1]
     }
   }
 
   udp_ingress_rules = {
-    for pair in setproduct(local.public_udp_ports, var.public_ingress_cidrs) :
+    for pair in setproduct(keys(local.udp_port_ranges), var.public_ingress_cidrs) :
     "${pair[0]}:${pair[1]}" => {
-      port   = pair[0]
+      min    = local.udp_port_ranges[pair[0]].min
+      max    = local.udp_port_ranges[pair[0]].max
       source = pair[1]
     }
   }
@@ -111,12 +139,12 @@ resource "oci_core_network_security_group_security_rule" "public_tcp" {
   protocol                  = "6"
   source                    = each.value.source
   source_type               = "CIDR_BLOCK"
-  description               = "Public TCP/${each.value.port} from ${each.value.source}"
+  description               = each.value.min == each.value.max ? "Public TCP/${each.value.min} from ${each.value.source}" : "Public TCP/${each.value.min}-${each.value.max} from ${each.value.source}"
 
   tcp_options {
     destination_port_range {
-      min = each.value.port
-      max = each.value.port
+      min = each.value.min
+      max = each.value.max
     }
   }
 }
@@ -129,12 +157,12 @@ resource "oci_core_network_security_group_security_rule" "public_udp" {
   protocol                  = "17"
   source                    = each.value.source
   source_type               = "CIDR_BLOCK"
-  description               = "Public UDP/${each.value.port} from ${each.value.source}"
+  description               = each.value.min == each.value.max ? "Public UDP/${each.value.min} from ${each.value.source}" : "Public UDP/${each.value.min}-${each.value.max} from ${each.value.source}"
 
   udp_options {
     destination_port_range {
-      min = each.value.port
-      max = each.value.port
+      min = each.value.min
+      max = each.value.max
     }
   }
 }

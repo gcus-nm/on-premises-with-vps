@@ -63,11 +63,18 @@ class RouteDialogMarkupTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        for route_filter in ("all", "applied", "pending", "deleted"):
+        for route_filter in ("all", "enabled", "disabled", "pending", "deleted"):
             self.assertIn(f'data-route-filter="{route_filter}"', html)
-        self.assertIn("data-cancel-delete", javascript)
-        self.assertIn("data-purge-route", javascript)
+        self.assertNotIn("data-cancel-delete", javascript)
+        self.assertNotIn("data-purge-route", javascript)
+        self.assertIn("/cancel-delete", javascript)
+        self.assertIn("/api/deleted-routes/", javascript)
+        self.assertIn("高度な操作", javascript)
+        self.assertIn("data-route-toggle", javascript)
+        self.assertIn("data-group-toggle", javascript)
         self.assertIn('pending_relay: "リレー同期待ち"', javascript)
+        self.assertIn('id="group-dialog"', html)
+        self.assertIn('id="route-advanced"', html)
 
 
 if __name__ == "__main__":

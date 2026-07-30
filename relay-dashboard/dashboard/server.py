@@ -96,6 +96,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json(
                 {
                     "routes": self.app.store.views(),
+                    "groups": self.app.store.group_views(),
                     "plan": self.app.terraform.load_plan_metadata(),
                     "audit": self.app.audit.recent(),
                     "busy": self.app.operation_lock.locked(),
@@ -156,26 +157,72 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     route = self.app.route_from_payload(payload)
-                    self.app.store.create(route)
+                    group_value = payload.get("group_id")
+                    group_id = str(group_value) if group_value else None
+                    self.app.store.create(
+                        route,
+                        group_id=group_id,
+                        desired_enabled=payload.get("desired_enabled", True),  # type: ignore[arg-type]
+                    )
                     self.app.terraform.invalidate_plan()
                     self.app.audit.append("route-create", "success", route.name)
-                    self.send_json({"routes": self.app.store.views()}, HTTPStatus.CREATED)
+                    self.send_store_state(HTTPStatus.CREATED)
                 finally:
                     self.app.operation_lock.release()
                 return
-            prefix = "/api/routes/"
-            suffix = "/cancel-delete"
-            if path.startswith(prefix) and path.endswith(suffix):
+            if path == "/api/groups":
                 if not self.acquire_operation():
                     return
                 try:
-                    record_id = unquote(path[len(prefix) : -len(suffix)])
+                    group = self.app.store.create_group(
+                        payload.get("name"),
+                        payload.get("description", ""),
+                        payload.get("members", []),
+                    )
+                    self.app.terraform.invalidate_plan()
+                    self.app.audit.append("group-create", "success", group.name)
+                    self.send_store_state(HTTPStatus.CREATED)
+                finally:
+                    self.app.operation_lock.release()
+                return
+            group_prefix = "/api/groups/"
+            group_routes_suffix = "/routes"
+            if path.startswith(group_prefix) and path.endswith(group_routes_suffix):
+                if not self.acquire_operation():
+                    return
+                try:
+                    group_id = unquote(
+                        path[len(group_prefix) : -len(group_routes_suffix)]
+                    )
+                    created = self.app.store.add_group_routes(
+                        group_id,
+                        payload.get("members", []),
+                    )
+                    self.app.terraform.invalidate_plan()
+                    self.app.audit.append(
+                        "group-routes-create",
+                        "success",
+                        f"{group_id}: {len(created)}件",
+                    )
+                    self.send_store_state(HTTPStatus.CREATED)
+                finally:
+                    self.app.operation_lock.release()
+                return
+            route_prefix = "/api/routes/"
+            cancel_suffix = "/cancel-delete"
+            if path.startswith(route_prefix) and path.endswith(cancel_suffix):
+                if not self.acquire_operation():
+                    return
+                try:
+                    record_id = unquote(
+                        path[len(route_prefix) : -len(cancel_suffix)]
+                    )
                     restored = self.app.store.cancel_delete(record_id)
                     self.app.terraform.invalidate_plan()
                     self.app.audit.append(
                         "route-delete-cancel", "success", restored.route.name
                     )
-                    self.send_json({"routes": self.app.store.views()})
+                    self.send_store_state()
                 finally:
                     self.app.operation_lock.release()
                 return
@@ -197,23 +244,75 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self.authenticate() or not self.validate_csrf():
             return
         path = urlparse(self.path).path
-        prefix = "/api/routes/"
-        if not path.startswith(prefix):
-            self.send_error_json(HTTPStatus.NOT_FOUND, "APIが見つかりません。")
-            return
-        record_id = unquote(path[len(prefix) :])
         if not self.acquire_operation():
             return
         try:
-            route = self.app.route_from_payload(self.read_json())
-            updated = self.app.store.update(record_id, route)
-            self.app.terraform.invalidate_plan()
-            self.app.audit.append(
-                "route-update",
-                "success",
-                updated.route.name,
-            )
-            self.send_json({"routes": self.app.store.views()})
+            payload = self.read_json()
+            route_prefix = "/api/routes/"
+            enabled_suffix = "/enabled"
+            if path.startswith(route_prefix) and path.endswith(enabled_suffix):
+                record_id = unquote(
+                    path[len(route_prefix) : -len(enabled_suffix)]
+                )
+                updated = self.app.store.set_enabled(
+                    record_id,
+                    payload.get("enabled"),  # type: ignore[arg-type]
+                )
+                self.app.terraform.invalidate_plan()
+                self.app.audit.append(
+                    "route-enabled" if updated.desired_enabled else "route-disabled",
+                    "success",
+                    updated.route.name,
+                )
+                self.send_store_state()
+                return
+            if path.startswith(route_prefix):
+                record_id = unquote(path[len(route_prefix) :])
+                route = self.app.route_from_payload(payload)
+                if "group_id" in payload:
+                    group_value = payload.get("group_id")
+                    updated = self.app.store.update(
+                        record_id,
+                        route,
+                        str(group_value) if group_value else None,
+                    )
+                else:
+                    updated = self.app.store.update(record_id, route)
+                self.app.terraform.invalidate_plan()
+                self.app.audit.append("route-update", "success", updated.route.name)
+                self.send_store_state()
+                return
+
+            group_prefix = "/api/groups/"
+            if path.startswith(group_prefix) and path.endswith(enabled_suffix):
+                group_id = unquote(
+                    path[len(group_prefix) : -len(enabled_suffix)]
+                )
+                enabled = payload.get("enabled")
+                updated = self.app.store.set_group_enabled(
+                    group_id,
+                    enabled,  # type: ignore[arg-type]
+                )
+                self.app.terraform.invalidate_plan()
+                self.app.audit.append(
+                    "group-enabled" if enabled is True else "group-disabled",
+                    "success",
+                    f"{group_id}: {len(updated)}件",
+                )
+                self.send_store_state()
+                return
+            if path.startswith(group_prefix):
+                group_id = unquote(path[len(group_prefix) :])
+                group = self.app.store.update_group(
+                    group_id,
+                    payload.get("name"),
+                    payload.get("description", ""),
+                )
+                self.app.terraform.invalidate_plan()
+                self.app.audit.append("group-update", "success", group.name)
+                self.send_store_state()
+                return
+            self.send_error_json(HTTPStatus.NOT_FOUND, "APIが見つかりません。")
         except (DashboardError, ValueError) as exc:
             status = HTTPStatus.CONFLICT if isinstance(exc, ConflictError) else HTTPStatus.BAD_REQUEST
             self.send_error_json(status, str(exc), command_output(exc))
@@ -229,6 +328,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             route_prefix = "/api/routes/"
             history_prefix = "/api/deleted-routes/"
+            group_prefix = "/api/groups/"
             if path.startswith(route_prefix):
                 record_id = unquote(path[len(route_prefix) :])
                 record = next(
@@ -245,7 +345,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.app.terraform.invalidate_plan()
                 action = "route-create-cancel" if cancelled else "route-delete-pending"
                 self.app.audit.append(action, "success", str(record["name"]))
-                self.send_json({"routes": self.app.store.views()})
+                self.send_store_state()
                 return
             if path.startswith(history_prefix):
                 record_id = unquote(path[len(history_prefix) :])
@@ -261,7 +361,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     raise DashboardError(f"経路が見つかりません: {record_id}")
                 self.app.store.purge_deleted(record_id)
                 self.app.audit.append("route-history-purge", "success", str(record["name"]))
-                self.send_json({"routes": self.app.store.views()})
+                self.send_store_state()
+                return
+            if path.startswith(group_prefix):
+                group_id = unquote(path[len(group_prefix) :])
+                group = next(
+                    (
+                        item
+                        for item in self.app.store.group_views()
+                        if item["id"] == group_id
+                    ),
+                    None,
+                )
+                if group is None:
+                    raise DashboardError(f"グループが見つかりません: {group_id}")
+                self.app.store.delete_group(group_id)
+                self.app.terraform.invalidate_plan()
+                self.app.audit.append("group-delete", "success", str(group["name"]))
+                self.send_store_state()
                 return
             self.send_error_json(HTTPStatus.NOT_FOUND, "APIが見つかりません。")
         except DashboardError as exc:
@@ -374,6 +491,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.BAD_GATEWAY, str(exc), command_output(exc))
         finally:
             self.app.operation_lock.release()
+
+    def send_store_state(self, status: HTTPStatus = HTTPStatus.OK) -> None:
+        self.send_json(
+            {
+                "routes": self.app.store.views(),
+                "groups": self.app.store.group_views(),
+            },
+            status,
+        )
 
     def acquire_operation(self) -> bool:
         if self.app.operation_lock.acquire(blocking=False):

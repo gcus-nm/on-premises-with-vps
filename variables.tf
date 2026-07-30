@@ -264,6 +264,48 @@ variable "dashboard_public_udp_ports" {
   }
 }
 
+variable "dashboard_public_tcp_port_ranges" {
+  description = "TCP port ranges managed by the relay dashboard. The dashboard supplies this value through a generated var file; do not set it in terraform.tfvars."
+  type = set(object({
+    min = number
+    max = number
+  }))
+  default = []
+
+  validation {
+    condition = alltrue([
+      for port_range in var.dashboard_public_tcp_port_ranges :
+      port_range.min >= 1 &&
+      port_range.max <= 65535 &&
+      floor(port_range.min) == port_range.min &&
+      floor(port_range.max) == port_range.max &&
+      port_range.min <= port_range.max
+    ])
+    error_message = "Every dashboard-managed TCP port range must contain integer min and max values from 1 through 65535, with min less than or equal to max."
+  }
+}
+
+variable "dashboard_public_udp_port_ranges" {
+  description = "UDP port ranges managed by the relay dashboard. The dashboard supplies this value through a generated var file; do not set it in terraform.tfvars."
+  type = set(object({
+    min = number
+    max = number
+  }))
+  default = []
+
+  validation {
+    condition = alltrue([
+      for port_range in var.dashboard_public_udp_port_ranges :
+      port_range.min >= 1 &&
+      port_range.max <= 65535 &&
+      floor(port_range.min) == port_range.min &&
+      floor(port_range.max) == port_range.max &&
+      port_range.min <= port_range.max
+    ])
+    error_message = "Every dashboard-managed UDP port range must contain integer min and max values from 1 through 65535, with min less than or equal to max."
+  }
+}
+
 variable "public_ingress_cidrs" {
   description = "IPv4 and IPv6 source CIDRs allowed to reach the WireGuard and additional public ports."
   type        = set(string)

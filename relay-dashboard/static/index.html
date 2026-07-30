@@ -24,8 +24,11 @@
           <button class="button button-quiet" id="preflight-button" type="button">
             環境チェック
           </button>
+          <button class="button button-quiet" id="new-group-button" type="button">
+            ＋ グループ
+          </button>
           <button class="button button-primary" id="new-route-button" type="button">
-            ＋ 経路を追加
+            ＋ 単一経路
           </button>
         </div>
       </header>
@@ -105,8 +108,11 @@
               <button class="route-tab active" type="button" role="tab" aria-selected="true" data-route-filter="all">
                 すべて <span data-filter-count="all">0</span>
               </button>
-              <button class="route-tab" type="button" role="tab" aria-selected="false" data-route-filter="applied">
-                反映済み <span data-filter-count="applied">0</span>
+              <button class="route-tab" type="button" role="tab" aria-selected="false" data-route-filter="enabled">
+                有効 <span data-filter-count="enabled">0</span>
+              </button>
+              <button class="route-tab" type="button" role="tab" aria-selected="false" data-route-filter="disabled">
+                無効 <span data-filter-count="disabled">0</span>
               </button>
               <button class="route-tab" type="button" role="tab" aria-selected="false" data-route-filter="pending">
                 未反映 <span data-filter-count="pending">0</span>
@@ -121,25 +127,12 @@
               <h3 id="empty-title">経路はまだ登録されていません</h3>
               <p id="empty-description">最初の公開ポートとMiniPCの転送先を追加してください。</p>
               <button class="button button-primary" id="empty-new-route-button" type="button">
-                最初の経路を追加
+                最初の単一経路を追加
               </button>
             </div>
 
-            <div class="table-wrap" id="routes-table-wrap" hidden>
-              <table>
-                <thead>
-                  <tr>
-                    <th>サービス</th>
-                    <th>プロトコル</th>
-                    <th>OCI公開</th>
-                    <th>MiniPC転送先</th>
-                    <th>説明</th>
-                    <th>状態</th>
-                    <th><span class="sr-only">操作</span></th>
-                  </tr>
-                </thead>
-                <tbody id="routes-body"></tbody>
-              </table>
+            <div class="route-list-wrap" id="routes-table-wrap" hidden>
+              <div id="routes-body" class="route-collection"></div>
             </div>
           </article>
 
@@ -247,6 +240,21 @@
             placeholder="Minecraft Java 共通入口"
           >
         </label>
+        <label>
+          <span>所属グループ</span>
+          <select id="route-group" name="group_id">
+            <option value="">単一経路（グループなし）</option>
+          </select>
+        </label>
+        <details class="advanced-zone" id="route-advanced" hidden>
+          <summary>高度な操作</summary>
+          <p id="route-advanced-description">
+            経路をOCIから削除する場合だけ使用してください。通常は一覧のトグルで無効化します。
+          </p>
+          <button class="button button-danger" id="delete-route-button" type="button">
+            この経路を削除待ちにする
+          </button>
+        </details>
         <p class="form-error" id="route-form-error" role="alert"></p>
         <div class="dialog-actions">
           <button
@@ -256,6 +264,81 @@
             formnovalidate
           >キャンセル</button>
           <button class="button button-primary" id="save-route-button" type="button">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="group-dialog" class="wide-dialog">
+      <form method="dialog" id="group-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">PORT GROUP EDITOR</p>
+            <h2 id="group-dialog-title">ポートグループを追加</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            aria-label="閉じる"
+            type="submit"
+            formnovalidate
+          >×</button>
+        </div>
+        <input type="hidden" id="group-id">
+        <div class="field-grid">
+          <label>
+            <span>グループ名</span>
+            <input
+              id="group-name"
+              name="name"
+              required
+              maxlength="18"
+              pattern="[a-z0-9][a-z0-9-]{0,17}"
+              placeholder="game-server"
+              autocomplete="off"
+            >
+            <small>小文字英数字とハイフン、最大18文字。</small>
+          </label>
+          <label>
+            <span>説明</span>
+            <input
+              id="group-description"
+              name="description"
+              maxlength="120"
+              placeholder="ゲーム用の公開ポート一式"
+            >
+          </label>
+        </div>
+        <div class="group-members-heading">
+          <div>
+            <h3>まとめて追加するポート</h3>
+            <p>公開ポートとMiniPCポートは同じ番号で転送します。</p>
+          </div>
+          <button class="button button-quiet" id="add-member-row-button" type="button">
+            ＋ 入力行
+          </button>
+        </div>
+        <div id="group-member-rows" class="group-member-rows"></div>
+        <div class="port-preview" id="group-port-preview" aria-live="polite">
+          ポート式を入力すると展開結果を確認できます。
+        </div>
+        <details class="advanced-zone" id="group-advanced" hidden>
+          <summary>高度な操作</summary>
+          <p>グループだけを解除します。所属経路やOCIの設定は削除されません。</p>
+          <button class="button button-danger" id="delete-group-button" type="button">
+            グループを解除
+          </button>
+        </details>
+        <p class="form-error" id="group-form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button
+            class="button button-quiet"
+            value="cancel"
+            type="submit"
+            formnovalidate
+          >キャンセル</button>
+          <button class="button button-primary" id="save-group-button" type="button">
+            保存
+          </button>
         </div>
       </form>
     </dialog>

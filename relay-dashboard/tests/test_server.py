@@ -192,7 +192,7 @@ class DashboardServerTests(unittest.TestCase):
             csrf=csrf,
         )
         self.assertEqual(status, 200)
-        self.assertEqual(restored["routes"][0]["state"], "applied")  # type: ignore[index]
+        self.assertEqual(restored["routes"][0]["state"], "enabled")  # type: ignore[index]
 
         self.request(
             f"/api/routes/{record.id}",
@@ -258,7 +258,133 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(sync_status, 200)
         _, applied_state = self.request("/api/state")
         self.assertFalse(applied_state["pending_relay"])
-        self.assertEqual(applied_state["routes"][0]["state"], "applied")  # type: ignore[index]
+        self.assertEqual(applied_state["routes"][0]["state"], "enabled")  # type: ignore[index]
+
+    def test_group_bulk_routes_and_enable_apis(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+
+        status, created = self.request(
+            "/api/groups",
+            method="POST",
+            body={
+                "name": "game",
+                "description": "ゲーム用",
+                "members": [
+                    {
+                        "protocol": "tcp",
+                        "ports": "8000-8001",
+                        "target_address": "10.99.0.2",
+                    },
+                    {
+                        "protocol": "udp",
+                        "ports": "9000",
+                        "target_address": "10.99.0.2",
+                    },
+                ],
+            },
+            csrf=csrf,
+        )
+
+        self.assertEqual(status, 201)
+        self.assertEqual(len(created["routes"]), 3)  # type: ignore[arg-type]
+        group = created["groups"][0]  # type: ignore[index]
+        group_id = str(group["id"])  # type: ignore[index]
+        self.assertEqual(group["enabled_state"], "enabled")  # type: ignore[index]
+        self.assertTrue(
+            all(route["target_port"] == route["public_port"] for route in created["routes"])  # type: ignore[index]
+        )
+
+        status, added = self.request(
+            f"/api/groups/{group_id}/routes",
+            method="POST",
+            body={
+                "members": [
+                    {
+                        "protocol": "udp",
+                        "ports": "9001",
+                        "target_address": "10.99.0.2",
+                    }
+                ]
+            },
+            csrf=csrf,
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(len(added["routes"]), 4)  # type: ignore[arg-type]
+        self.assertTrue(
+            any(route["name"] == "game-udp-9001" for route in added["routes"])  # type: ignore[index]
+        )
+
+        status, disabled = self.request(
+            f"/api/groups/{group_id}/enabled",
+            method="PUT",
+            body={"enabled": False},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(
+            all(route["state"] == "disabled" for route in disabled["routes"])  # type: ignore[index]
+        )
+
+        record_id = str(disabled["routes"][0]["id"])  # type: ignore[index]
+        status, mixed = self.request(
+            f"/api/routes/{record_id}/enabled",
+            method="PUT",
+            body={"enabled": True},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(mixed["groups"][0]["enabled_state"], "mixed")  # type: ignore[index]
+
+        status, ungrouped = self.request(
+            f"/api/groups/{group_id}",
+            method="DELETE",
+            body={},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(ungrouped["groups"], [])
+        self.assertTrue(
+            all(route["group_id"] is None for route in ungrouped["routes"])  # type: ignore[index]
+        )
+
+    def test_group_bulk_creation_rolls_back_on_conflict(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        route_payload = {
+            "name": "existing",
+            "protocol": "tcp",
+            "public_port": 8000,
+            "target_address": "10.99.0.2",
+            "target_port": 8000,
+        }
+        self.request(
+            "/api/routes",
+            method="POST",
+            body=route_payload,
+            csrf=csrf,
+        )
+
+        status, _ = self.request(
+            "/api/groups",
+            method="POST",
+            body={
+                "name": "game",
+                "members": [
+                    {
+                        "protocol": "tcp",
+                        "ports": "8000-8001",
+                        "target_address": "10.99.0.2",
+                    }
+                ],
+            },
+            csrf=csrf,
+        )
+
+        self.assertEqual(status, 409)
+        _, refreshed = self.request("/api/state")
+        self.assertEqual(refreshed["groups"], [])
+        self.assertEqual(len(refreshed["routes"]), 1)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
