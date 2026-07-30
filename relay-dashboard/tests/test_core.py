@@ -323,6 +323,14 @@ class TerraformPlanAnalysisTests(unittest.TestCase):
                 manager._environment()["TMPDIR"],
                 str(Path(data_directory) / "tmp"),
             )
+            self.assertEqual(
+                manager._environment()["TF_HOME_OVERRIDE"],
+                str(manager.runtime_home),
+            )
+            self.assertEqual(
+                manager._environment()["OCI_HOME_OVERRIDE"],
+                str(manager.runtime_home),
+            )
             self.assertTrue((Path(data_directory) / "tmp").is_dir())
 
 
