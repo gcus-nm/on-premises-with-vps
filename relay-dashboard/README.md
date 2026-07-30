@@ -90,6 +90,10 @@ MiniPCのPowerShellでリポジトリルートへ移動し、セットアップ�
 
 `relay-dashboard/.env`と`relay-dashboard/secrets`はGit管理対象外です。
 
+Windows版`ssh-keyscan`が鍵を返さない場合は、通常のSSH接続で登録済みの
+`$HOME\.ssh\known_hosts`から`10.99.0.1`のED25519鍵を取得します。どちらの経路でも、
+既知のフィンガープリントと一致しない鍵は保存しません。
+
 ## 3. Windows Firewallを一度だけ設定する
 
 管理者として起動したPowerShellで実行します。
