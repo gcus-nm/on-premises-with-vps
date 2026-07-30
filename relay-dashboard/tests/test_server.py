@@ -9,8 +9,9 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from dashboard.core import DashboardError
 from dashboard.server import AppContext, DashboardServer
 
 
@@ -83,6 +84,29 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "ok")
 
+    def test_route_mutation_is_blocked_during_an_operation(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        self.app.operation_lock.acquire()
+        try:
+            status, _ = self.request(
+                "/api/routes",
+                method="POST",
+                body={
+                    "name": "minecraft",
+                    "protocol": "tcp",
+                    "public_port": 25565,
+                    "target_address": "10.99.0.2",
+                    "target_port": 25565,
+                },
+                csrf=csrf,
+            )
+        finally:
+            self.app.operation_lock.release()
+
+        self.assertEqual(status, 409)
+        self.assertEqual(self.app.store.views(), [])
+
     def test_route_api_requires_csrf_and_persists_route(self) -> None:
         status, state = self.request("/api/state")
         self.assertEqual(status, 200)
@@ -111,9 +135,130 @@ class DashboardServerTests(unittest.TestCase):
         )
         self.assertEqual(created_status, 201)
         self.assertEqual(created["routes"][0]["name"], "minecraft")  # type: ignore[index]
+        self.assertEqual(created["routes"][0]["state"], "pending_create")  # type: ignore[index]
 
         _, refreshed = self.request("/api/state")
         self.assertEqual(refreshed["routes"][0]["public_port"], 25565)  # type: ignore[index]
+
+        record_id = str(refreshed["routes"][0]["id"])  # type: ignore[index]
+        updated_status, updated = self.request(
+            f"/api/routes/{record_id}",
+            method="PUT",
+            body={**route, "name": "minecraft-main"},
+            csrf=csrf,
+        )
+        self.assertEqual(updated_status, 200)
+        self.assertEqual(updated["routes"][0]["name"], "minecraft-main")  # type: ignore[index]
+
+        deleted_status, deleted = self.request(
+            f"/api/routes/{record_id}",
+            method="DELETE",
+            body={},
+            csrf=csrf,
+        )
+        self.assertEqual(deleted_status, 200)
+        self.assertEqual(deleted["routes"], [])
+
+    def test_applied_delete_cancel_and_history_purge(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        record = self.app.store.create(
+            self.app.route_from_payload(
+                {
+                    "name": "minecraft",
+                    "protocol": "tcp",
+                    "public_port": 25565,
+                    "target_address": "10.99.0.2",
+                    "target_port": 25565,
+                }
+            )
+        )
+        self.app.store.mark_terraform_applied()
+        self.app.store.commit_relay_sync()
+
+        status, pending = self.request(
+            f"/api/routes/{record.id}",
+            method="DELETE",
+            body={},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(pending["routes"][0]["state"], "pending_delete")  # type: ignore[index]
+
+        status, restored = self.request(
+            f"/api/routes/{record.id}/cancel-delete",
+            method="POST",
+            body={},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(restored["routes"][0]["state"], "applied")  # type: ignore[index]
+
+        self.request(
+            f"/api/routes/{record.id}",
+            method="DELETE",
+            body={},
+            csrf=csrf,
+        )
+        self.app.store.mark_terraform_applied()
+        self.app.store.commit_relay_sync()
+        status, purged = self.request(
+            f"/api/deleted-routes/{record.id}",
+            method="DELETE",
+            body={},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(purged["routes"], [])
+
+    def test_partial_apply_locks_mutation_until_relay_resync(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        route_payload = {
+            "name": "minecraft",
+            "protocol": "tcp",
+            "public_port": 25565,
+            "target_address": "10.99.0.2",
+            "target_port": 25565,
+        }
+        self.app.store.create(self.app.route_from_payload(route_payload))
+        self.app.terraform.apply = Mock(return_value="terraform applied")  # type: ignore[method-assign]
+        self.app.terraform.invalidate_plan = Mock()  # type: ignore[method-assign]
+        self.app.relay.sync = Mock(  # type: ignore[method-assign]
+            side_effect=DashboardError("relay unavailable")
+        )
+
+        status, partial = self.request(
+            "/api/apply",
+            method="POST",
+            body={"confirmation": "APPLY"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 502)
+        self.assertTrue(partial["partial"])
+        _, pending_state = self.request("/api/state")
+        self.assertTrue(pending_state["pending_relay"])
+        self.assertEqual(pending_state["routes"][0]["state"], "pending_relay")  # type: ignore[index]
+
+        blocked_status, _ = self.request(
+            "/api/routes",
+            method="POST",
+            body={**route_payload, "name": "blocked", "public_port": 25566},
+            csrf=csrf,
+        )
+        self.assertEqual(blocked_status, 409)
+
+        self.app.relay.sync = Mock(return_value=["追加: ui-minecraft"])  # type: ignore[method-assign]
+        sync_status, _ = self.request(
+            "/api/sync",
+            method="POST",
+            body={"confirmation": "SYNC"},
+            csrf=csrf,
+        )
+        self.assertEqual(sync_status, 200)
+        _, applied_state = self.request("/api/state")
+        self.assertFalse(applied_state["pending_relay"])
+        self.assertEqual(applied_state["routes"][0]["state"], "applied")  # type: ignore[index]
 
 
 if __name__ == "__main__":

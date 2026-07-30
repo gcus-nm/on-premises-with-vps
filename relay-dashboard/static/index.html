@@ -101,10 +101,25 @@
               </div>
             </div>
 
+            <div class="route-tabs" id="route-tabs" role="tablist" aria-label="経路状態">
+              <button class="route-tab active" type="button" role="tab" aria-selected="true" data-route-filter="all">
+                すべて <span data-filter-count="all">0</span>
+              </button>
+              <button class="route-tab" type="button" role="tab" aria-selected="false" data-route-filter="applied">
+                反映済み <span data-filter-count="applied">0</span>
+              </button>
+              <button class="route-tab" type="button" role="tab" aria-selected="false" data-route-filter="pending">
+                未反映 <span data-filter-count="pending">0</span>
+              </button>
+              <button class="route-tab" type="button" role="tab" aria-selected="false" data-route-filter="deleted">
+                削除済み <span data-filter-count="deleted">0</span>
+              </button>
+            </div>
+
             <div class="empty-state" id="empty-state">
               <span class="empty-symbol" aria-hidden="true">↗</span>
-              <h3>経路はまだ登録されていません</h3>
-              <p>最初の公開ポートとMiniPCの転送先を追加してください。</p>
+              <h3 id="empty-title">経路はまだ登録されていません</h3>
+              <p id="empty-description">最初の公開ポートとMiniPCの転送先を追加してください。</p>
               <button class="button button-primary" id="empty-new-route-button" type="button">
                 最初の経路を追加
               </button>
@@ -119,6 +134,7 @@
                     <th>OCI公開</th>
                     <th>MiniPC転送先</th>
                     <th>説明</th>
+                    <th>状態</th>
                     <th><span class="sr-only">操作</span></th>
                   </tr>
                 </thead>
@@ -185,7 +201,7 @@
             formnovalidate
           >×</button>
         </div>
-        <input type="hidden" id="original-name">
+        <input type="hidden" id="record-id">
         <label>
           <span>経路名</span>
           <input

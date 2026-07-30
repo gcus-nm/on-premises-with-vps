@@ -81,20 +81,101 @@ class RouteValidationTests(unittest.TestCase):
 
 
 class RouteStoreTests(unittest.TestCase):
-    def test_crud_round_trip(self) -> None:
+    def test_unapplied_create_update_and_delete_cancel(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RouteStore(Path(directory))
-            store.create(route())
+            created = store.create(route())
             self.assertEqual([item.name for item in store.list()], ["minecraft"])
+            self.assertEqual(store.views()[0]["state"], "pending_create")
 
-            store.update("minecraft", route(name="minecraft-main", target_port=41409))
+            store.update(created.id, route(name="minecraft-main", target_port=41409))
             self.assertEqual(store.list()[0].name, "minecraft-main")
             self.assertEqual(store.list()[0].target_port, 41409)
 
-            store.delete("minecraft-main")
+            cancelled = store.delete(created.id)
+            self.assertTrue(cancelled)
             self.assertEqual(store.list(), [])
             payload = json.loads((Path(directory) / "routes.json").read_text())
-            self.assertEqual(payload["version"], 1)
+            self.assertEqual(payload["version"], 2)
+            self.assertEqual(payload["records"], [])
+
+    def test_migrates_v1_routes_as_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "routes.json"
+            path.write_text(
+                json.dumps({"version": 1, "routes": [route().__dict__]}),
+                encoding="utf-8",
+            )
+
+            store = RouteStore(Path(directory))
+            views = store.views()
+
+            self.assertEqual(views[0]["state"], "applied")
+            self.assertEqual(json.loads(path.read_text())["version"], 2)
+
+    def test_applied_update_delete_restore_and_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RouteStore(Path(directory))
+            created = store.create(route())
+            store.mark_terraform_applied()
+            self.assertEqual(store.views()[0]["state"], "pending_relay")
+            store.commit_relay_sync()
+            self.assertEqual(store.views()[0]["state"], "applied")
+
+            store.update(created.id, route(target_port=41409))
+            self.assertEqual(store.views()[0]["state"], "pending_update")
+            store.update(created.id, route())
+            self.assertEqual(store.views()[0]["state"], "applied")
+
+            self.assertFalse(store.delete(created.id))
+            self.assertEqual(store.views()[0]["state"], "pending_delete")
+            store.cancel_delete(created.id)
+            self.assertEqual(store.views()[0]["state"], "applied")
+
+            store.delete(created.id)
+            store.mark_terraform_applied()
+            reloaded = RouteStore(Path(directory))
+            self.assertTrue(reloaded.has_pending_relay())
+            self.assertEqual(reloaded.relay_sync_routes(), [])
+            with self.assertRaises(ConflictError):
+                reloaded.create(route(name="blocked", public_port=25566))
+            reloaded.commit_relay_sync()
+
+            deleted = reloaded.views()[0]
+            self.assertEqual(deleted["state"], "deleted")
+            self.assertEqual(reloaded.list(), [])
+            self.assertEqual(reloaded.applied(), [])
+            reloaded.purge_deleted(created.id)
+            self.assertEqual(reloaded.views(), [])
+
+    def test_normal_relay_sync_uses_last_applied_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RouteStore(Path(directory))
+            applied = store.create(route())
+            store.mark_terraform_applied()
+            store.commit_relay_sync()
+            store.update(applied.id, route(target_port=41409))
+            store.create(route(name="new", public_port=25566))
+
+            sync_routes = store.relay_sync_routes()
+
+            self.assertEqual(len(sync_routes), 1)
+            self.assertEqual(sync_routes[0].target_port, 25565)
+
+    def test_pending_relay_marks_only_changed_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RouteStore(Path(directory))
+            changed = store.create(route())
+            store.create(route(name="unchanged", public_port=25566))
+            store.mark_terraform_applied()
+            store.commit_relay_sync()
+            store.update(changed.id, route(target_port=41409))
+
+            store.mark_terraform_applied()
+            states = {item["name"]: item["state"] for item in store.views()}
+
+            self.assertEqual(states["minecraft"], "pending_relay")
+            self.assertEqual(states["unchanged"], "applied")
 
     def test_uses_configured_wireguard_network_when_reloading(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

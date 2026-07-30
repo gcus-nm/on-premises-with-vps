@@ -11,7 +11,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from dataclasses import asdict, dataclass
+import uuid
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -107,6 +108,18 @@ class Route:
 
 
 @dataclass(frozen=True)
+class RouteRecord:
+    id: str
+    route: Route
+    applied_route: Route | None
+    desired_active: bool
+    created_at: str
+    updated_at: str
+    applied_at: str | None = None
+    deleted_at: str | None = None
+
+
+@dataclass(frozen=True)
 class RelayRoute:
     name: str
     protocol: str
@@ -133,6 +146,10 @@ class CommandResult:
     @property
     def output(self) -> str:
         return "\n".join(part for part in (self.stdout, self.stderr) if part).strip()
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def parse_port(value: Any, label: str) -> int:
@@ -249,59 +266,362 @@ class RouteStore:
         data_dir.mkdir(parents=True, exist_ok=True)
 
     def list(self) -> list[Route]:
-        with self.lock:
-            if not self.path.exists():
-                return []
-            try:
-                value = json.loads(self.path.read_text(encoding="utf-8"))
-                routes = [
-                    Route.from_mapping(
-                        item,
-                        relay_network=self.relay_network,
-                        relay_address=self.relay_address,
-                    )
-                    for item in value.get("routes", [])
-                ]
-                return validate_route_set(routes)
-            except (OSError, json.JSONDecodeError, TypeError) as exc:
-                raise DashboardError(f"経路データを読み込めません: {exc}") from exc
+        return [
+            record.route
+            for record in self.records()
+            if record.desired_active and record.deleted_at is None
+        ]
 
-    def create(self, route: Route) -> list[Route]:
-        with self.lock:
-            routes = self.list()
-            if any(existing.name == route.name for existing in routes):
-                raise ConflictError(f"経路名は既に使用されています: {route.name}")
-            routes.append(route)
-            return self._save(routes)
+    def applied(self) -> list[Route]:
+        return [
+            record.applied_route
+            for record in self.records()
+            if record.applied_route is not None
+        ]
 
-    def update(self, original_name: str, route: Route) -> list[Route]:
+    def records(self) -> list[RouteRecord]:
         with self.lock:
-            routes = self.list()
-            if not any(existing.name == original_name for existing in routes):
-                raise DashboardError(f"更新対象の経路が見つかりません: {original_name}")
-            if route.name != original_name and any(
-                existing.name == route.name for existing in routes
+            records, _ = self._load()
+            return records
+
+    def views(self) -> list[dict[str, Any]]:
+        with self.lock:
+            records, pending_relay = self._load()
+            pending_ids = self._pending_record_ids(pending_relay)
+            return [
+                self._record_view(record, record.id in pending_ids)
+                for record in sorted(
+                    records,
+                    key=lambda item: (
+                        item.deleted_at is not None,
+                        item.route.protocol,
+                        item.route.public_port,
+                        item.route.name,
+                    ),
+                )
+            ]
+
+    def create(self, route: Route) -> RouteRecord:
+        with self.lock:
+            records, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            if any(
+                existing.deleted_at is None
+                and existing.desired_active
+                and existing.route.name == route.name
+                for existing in records
             ):
                 raise ConflictError(f"経路名は既に使用されています: {route.name}")
-            updated = [route if existing.name == original_name else existing for existing in routes]
-            return self._save(updated)
+            now = utc_now()
+            record = RouteRecord(
+                id=str(uuid.uuid4()),
+                route=route,
+                applied_route=None,
+                desired_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+            records.append(record)
+            self._save(records, pending_relay)
+            return record
 
-    def delete(self, name: str) -> list[Route]:
+    def update(self, record_id: str, route: Route) -> RouteRecord:
         with self.lock:
-            routes = self.list()
-            filtered = [route for route in routes if route.name != name]
-            if len(filtered) == len(routes):
-                raise DashboardError(f"削除対象の経路が見つかりません: {name}")
-            return self._save(filtered)
+            records, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            target = self._find(records, record_id)
+            if target.deleted_at is not None or not target.desired_active:
+                raise DashboardError("削除待ちまたは削除済みの経路は編集できません。")
+            if route.name != target.route.name and any(
+                existing.id != record_id
+                and existing.deleted_at is None
+                and existing.desired_active
+                and existing.route.name == route.name
+                for existing in records
+            ):
+                raise ConflictError(f"経路名は既に使用されています: {route.name}")
+            updated = replace(target, route=route, updated_at=utc_now())
+            records = [updated if item.id == record_id else item for item in records]
+            self._save(records, pending_relay)
+            return updated
 
-    def _save(self, routes: Iterable[Route]) -> list[Route]:
-        validated = validate_route_set(routes)
+    def delete(self, record_id: str) -> bool:
+        with self.lock:
+            records, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            target = self._find(records, record_id)
+            if target.deleted_at is not None:
+                raise DashboardError("削除済み履歴は履歴消去を使用してください。")
+            if target.applied_route is None:
+                self._save([item for item in records if item.id != record_id], pending_relay)
+                return True
+            pending_delete = RouteRecord(
+                id=target.id,
+                route=target.applied_route,
+                applied_route=target.applied_route,
+                desired_active=False,
+                created_at=target.created_at,
+                updated_at=utc_now(),
+                applied_at=target.applied_at,
+                deleted_at=None,
+            )
+            records = [pending_delete if item.id == record_id else item for item in records]
+            self._save(records, pending_relay)
+            return False
+
+    def cancel_delete(self, record_id: str) -> RouteRecord:
+        with self.lock:
+            records, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            target = self._find(records, record_id)
+            if target.deleted_at is not None or target.desired_active or target.applied_route is None:
+                raise DashboardError("削除待ちの経路ではありません。")
+            restored = replace(
+                target,
+                route=target.applied_route,
+                desired_active=True,
+                updated_at=utc_now(),
+            )
+            records = [restored if item.id == record_id else item for item in records]
+            self._save(records, pending_relay)
+            return restored
+
+    def purge_deleted(self, record_id: str) -> None:
+        with self.lock:
+            records, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            target = self._find(records, record_id)
+            if target.deleted_at is None:
+                raise DashboardError("削除済みの経路だけ履歴から消去できます。")
+            self._save([item for item in records if item.id != record_id], pending_relay)
+
+    def has_pending_relay(self) -> bool:
+        with self.lock:
+            _, pending_relay = self._load()
+            return pending_relay is not None
+
+    def mark_terraform_applied(self) -> None:
+        with self.lock:
+            records, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            pending_relay = {
+                "created_at": utc_now(),
+                "active": [
+                    {"id": record.id, "route": asdict(record.route)}
+                    for record in records
+                    if record.desired_active and record.deleted_at is None
+                ],
+                "deleted_ids": [
+                    record.id
+                    for record in records
+                    if not record.desired_active
+                    and record.deleted_at is None
+                    and record.applied_route is not None
+                ],
+                "changed_ids": [
+                    record.id
+                    for record in records
+                    if (
+                        record.desired_active
+                        and record.deleted_at is None
+                        and record.route != record.applied_route
+                    )
+                    or (
+                        not record.desired_active
+                        and record.deleted_at is None
+                        and record.applied_route is not None
+                    )
+                ],
+            }
+            self._save(records, pending_relay)
+
+    def relay_sync_routes(self) -> list[Route]:
+        with self.lock:
+            _, pending_relay = self._load()
+            if pending_relay is None:
+                return self.applied()
+            return [
+                self._route_from_mapping(item["route"])
+                for item in pending_relay.get("active", [])
+            ]
+
+    def commit_relay_sync(self) -> None:
+        with self.lock:
+            records, pending_relay = self._load()
+            if pending_relay is None:
+                return
+            now = utc_now()
+            active = {
+                str(item["id"]): self._route_from_mapping(item["route"])
+                for item in pending_relay.get("active", [])
+            }
+            deleted_ids = {str(item) for item in pending_relay.get("deleted_ids", [])}
+            committed: list[RouteRecord] = []
+            for record in records:
+                if record.id in active:
+                    committed.append(
+                        replace(
+                            record,
+                            route=active[record.id],
+                            applied_route=active[record.id],
+                            desired_active=True,
+                            updated_at=now,
+                            applied_at=now,
+                        )
+                    )
+                elif record.id in deleted_ids:
+                    committed.append(
+                        replace(
+                            record,
+                            applied_route=None,
+                            desired_active=False,
+                            updated_at=now,
+                            deleted_at=now,
+                        )
+                    )
+                else:
+                    committed.append(record)
+            self._save(committed, None)
+
+    def _load(self) -> tuple[list[RouteRecord], dict[str, Any] | None]:
+        if not self.path.exists():
+            return [], None
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            if value.get("version") == 1:
+                return self._migrate_v1(value), None
+            if value.get("version") != 2:
+                raise DashboardError("未対応の経路データ形式です。")
+            records = [self._record_from_mapping(item) for item in value.get("records", [])]
+            self._validate_records(records)
+            pending_relay = value.get("pending_relay")
+            if pending_relay is not None and not isinstance(pending_relay, dict):
+                raise DashboardError("リレー同期待ちデータが不正です。")
+            return records, pending_relay
+        except (OSError, json.JSONDecodeError, TypeError, KeyError) as exc:
+            raise DashboardError(f"経路データを読み込めません: {exc}") from exc
+
+    def _migrate_v1(self, value: dict[str, Any]) -> list[RouteRecord]:
+        now = utc_now()
+        routes = [self._route_from_mapping(item) for item in value.get("routes", [])]
+        validate_route_set(routes)
+        records = [
+            RouteRecord(
+                id=str(uuid.uuid4()),
+                route=route,
+                applied_route=route,
+                desired_active=True,
+                created_at=now,
+                updated_at=now,
+                applied_at=now,
+            )
+            for route in routes
+        ]
+        self._save(records, None)
+        return records
+
+    def _route_from_mapping(self, value: dict[str, Any]) -> Route:
+        return Route.from_mapping(
+            value,
+            relay_network=self.relay_network,
+            relay_address=self.relay_address,
+        )
+
+    def _record_from_mapping(self, value: dict[str, Any]) -> RouteRecord:
+        applied_value = value.get("applied_route")
+        return RouteRecord(
+            id=str(value["id"]),
+            route=self._route_from_mapping(value["route"]),
+            applied_route=(
+                self._route_from_mapping(applied_value)
+                if isinstance(applied_value, dict)
+                else None
+            ),
+            desired_active=bool(value["desired_active"]),
+            created_at=str(value["created_at"]),
+            updated_at=str(value["updated_at"]),
+            applied_at=str(value["applied_at"]) if value.get("applied_at") else None,
+            deleted_at=str(value["deleted_at"]) if value.get("deleted_at") else None,
+        )
+
+    def _validate_records(self, records: list[RouteRecord]) -> None:
+        ids = [record.id for record in records]
+        if len(ids) != len(set(ids)):
+            raise DashboardError("経路IDが重複しています。")
+        validate_route_set(
+            record.route
+            for record in records
+            if record.desired_active and record.deleted_at is None
+        )
+
+    def _save(
+        self,
+        records: Iterable[RouteRecord],
+        pending_relay: dict[str, Any] | None,
+    ) -> None:
+        materialized = list(records)
+        self._validate_records(materialized)
         payload = {
-            "version": 1,
-            "routes": [asdict(route) for route in validated],
+            "version": 2,
+            "records": [asdict(record) for record in materialized],
+            "pending_relay": pending_relay,
         }
         atomic_write_json(self.path, payload, mode=0o600)
-        return validated
+
+    @staticmethod
+    def _find(records: list[RouteRecord], record_id: str) -> RouteRecord:
+        for record in records:
+            if record.id == record_id:
+                return record
+        raise DashboardError(f"経路が見つかりません: {record_id}")
+
+    @staticmethod
+    def _require_mutable(pending_relay: dict[str, Any] | None) -> None:
+        if pending_relay is not None:
+            raise ConflictError(
+                "Terraform適用後のリレー同期待ちです。先に「リレーだけ再同期」を実行してください。"
+            )
+
+    @staticmethod
+    def _pending_record_ids(pending_relay: dict[str, Any] | None) -> set[str]:
+        if pending_relay is None:
+            return set()
+        if "changed_ids" in pending_relay:
+            return {str(item) for item in pending_relay.get("changed_ids", [])}
+        return {
+            *(str(item["id"]) for item in pending_relay.get("active", [])),
+            *(str(item) for item in pending_relay.get("deleted_ids", [])),
+        }
+
+    def _record_view(self, record: RouteRecord, relay_pending: bool) -> dict[str, Any]:
+        if record.deleted_at is not None:
+            state = "deleted"
+            group = "deleted"
+        elif relay_pending:
+            state = "pending_relay"
+            group = "pending"
+        elif not record.desired_active:
+            state = "pending_delete"
+            group = "pending"
+        elif record.applied_route is None:
+            state = "pending_create"
+            group = "pending"
+        elif record.route != record.applied_route:
+            state = "pending_update"
+            group = "pending"
+        else:
+            state = "applied"
+            group = "applied"
+        return {
+            "id": record.id,
+            **asdict(record.route),
+            "state": state,
+            "state_group": group,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "applied_at": record.applied_at,
+            "deleted_at": record.deleted_at,
+        }
 
 
 class AuditLog:
