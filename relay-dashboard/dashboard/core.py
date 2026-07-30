@@ -499,7 +499,9 @@ class TerraformManager:
         self.plan_file = data_dir / "dashboard.tfplan"
         self.plan_meta_file = data_dir / "plan-meta.json"
         self.tf_data_dir = data_dir / "terraform"
+        self.temp_dir = data_dir / "tmp"
         data_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
     def configuration_files(self) -> list[Path]:
         candidates = sorted(self.source_workspace.glob("*.tf"))
@@ -539,6 +541,7 @@ class TerraformManager:
         environment = child_process_environment()
         environment.update(
             {
+                "TMPDIR": str(self.temp_dir),
                 "TF_DATA_DIR": str(self.tf_data_dir),
                 "TF_IN_AUTOMATION": "true",
                 "TF_INPUT": "false",
