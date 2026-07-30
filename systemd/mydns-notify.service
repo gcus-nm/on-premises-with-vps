@@ -1,0 +1,35 @@
+[Unit]
+Description=Notify MyDNS.JP of the OCI relay public IPv4 address
+Documentation=https://www.mydns.jp/?MENU=200
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/mydns-notify/config.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mydns-notify notify
+User=root
+Group=root
+UMask=0077
+TimeoutStartSec=45s
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=

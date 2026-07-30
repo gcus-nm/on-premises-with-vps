@@ -42,6 +42,10 @@ OCI公開ポートとWireGuard転送経路をブラウザから管理する場�
 
 VM内部を週次バックアップし、障害時に復旧する手順は[OCIブートボリュームのバックアップと復旧](BACKUP.md)を参照してください。
 
+MyDNS.JPのChild IDを使ってOCIの予約済みIPv4をサブドメインへ定期通知する場合は、
+[MyDNS.JPへのIPv4通知](MYDNS.md)を参照してください。認証情報はTerraformやGitへ
+保存せず、OCI VM内のroot専用ファイルで管理します。
+
 ## 無料枠についての注意
 
 OCIの[Always Free公式ドキュメント](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)では、`VM.Standard.E2.1.Micro`は最大2台、Ampere A1はテナンシー全体で合計2 OCPU・メモリ12 GiB相当が無料枠です。ブロックボリュームはテナンシー全体で合計200 GBまでです。
@@ -322,6 +326,7 @@ OCI環境の作成後は、次の順番で実装します。
 6. 戻り通信の経路とSNATを設定する
 7. IPv4、IPv6、TCP、UDPをそれぞれ疎通確認する
 8. 必要ならDNSのA/AAAAレコードをTerraformの出力IPへ向ける
+   - MyDNS.JPを使う場合は[MyDNS.JPへのIPv4通知](MYDNS.md)を参照する
 
 WireGuard秘密鍵をTerraform変数やstateへ保存すると、stateを読める人が秘密鍵を取得できてしまいます。そのため、鍵生成とWireGuard設定はTerraform stateへ秘密情報を入れない方式で追加します。
 

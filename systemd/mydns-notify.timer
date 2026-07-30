@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the MyDNS.JP IPv4 notification daily
+
+[Timer]
+OnBootSec=5min
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30min
+AccuracySec=1min
+Unit=mydns-notify.service
+
+[Install]
+WantedBy=timers.target
