@@ -491,7 +491,8 @@ class TerraformManager:
         timeout: int = 600,
     ) -> None:
         self.source_workspace = workspace
-        self.workspace = Path.home() / "terraform-workspace"
+        self.runtime_home = Path.home()
+        self.workspace = self.runtime_home / "terraform-workspace"
         self.data_dir = data_dir
         self.runner = runner
         self.timeout = timeout
@@ -541,8 +542,10 @@ class TerraformManager:
         environment = child_process_environment()
         environment.update(
             {
+                "OCI_HOME_OVERRIDE": str(self.runtime_home),
                 "TMPDIR": str(self.temp_dir),
                 "TF_DATA_DIR": str(self.tf_data_dir),
+                "TF_HOME_OVERRIDE": str(self.runtime_home),
                 "TF_IN_AUTOMATION": "true",
                 "TF_INPUT": "false",
             }
