@@ -9,6 +9,11 @@ readonly REMOTE_SCRIPT="${SCRIPT_DIR}/wg-relay-remote.sh"
 readonly REMOTE_PATH="/usr/local/sbin/wg-relay"
 readonly SSH_HOST="${WG_RELAY_SSH_HOST:-oci-relay}"
 readonly GENERATED_DIR="${PROJECT_DIR}/generated/wireguard"
+SSH_CONFIG="${WG_RELAY_SSH_CONFIG:-}"
+if [ -z "${SSH_CONFIG}" ] && [ -n "${HOME:-}" ] && [ -f "${HOME}/.ssh/config" ]; then
+  SSH_CONFIG="${HOME}/.ssh/config"
+fi
+readonly SSH_CONFIG
 
 log() {
   printf 'wg-relay: %s\n' "$*" >&2
@@ -43,6 +48,7 @@ Usage:
 
 Environment:
   WG_RELAY_SSH_HOST  SSH config host used for the relay (default: oci-relay)
+  WG_RELAY_SSH_CONFIG  SSH config path (default: $HOME/.ssh/config when present)
 EOF
 }
 
@@ -50,8 +56,26 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+relay_ssh() {
+  if [ -n "${SSH_CONFIG}" ]; then
+    ssh -F "${SSH_CONFIG}" "${SSH_HOST}" "$@"
+  else
+    ssh "${SSH_HOST}" "$@"
+  fi
+}
+
+relay_scp() {
+  local source="$1"
+  local remote_path="$2"
+  if [ -n "${SSH_CONFIG}" ]; then
+    scp -F "${SSH_CONFIG}" -q "${source}" "${SSH_HOST}:${remote_path}"
+  else
+    scp -q "${source}" "${SSH_HOST}:${remote_path}"
+  fi
+}
+
 remote_command() {
-  ssh "${SSH_HOST}" sudo "${REMOTE_PATH}" "$@"
+  relay_ssh sudo "${REMOTE_PATH}" "$@"
 }
 
 install_remote() {
@@ -59,19 +83,19 @@ install_remote() {
   require_command scp
   [ -f "${REMOTE_SCRIPT}" ] || die "remote manager script not found: ${REMOTE_SCRIPT}"
 
-  remote_temporary="$(ssh "${SSH_HOST}" mktemp /tmp/wg-relay.XXXXXX)"
+  remote_temporary="$(relay_ssh mktemp /tmp/wg-relay.XXXXXX)"
   case "${remote_temporary}" in
     /tmp/wg-relay.*) ;;
     *) die "unexpected remote temporary path: ${remote_temporary}" ;;
   esac
 
-  if ! scp -q "${REMOTE_SCRIPT}" "${SSH_HOST}:${remote_temporary}"; then
-    ssh "${SSH_HOST}" rm -f "${remote_temporary}" || true
+  if ! relay_scp "${REMOTE_SCRIPT}" "${remote_temporary}"; then
+    relay_ssh rm -f "${remote_temporary}" || true
     die "failed to upload remote manager"
   fi
 
-  ssh "${SSH_HOST}" sudo install -o root -g root -m 0755 "${remote_temporary}" "${REMOTE_PATH}"
-  ssh "${SSH_HOST}" rm -f "${remote_temporary}"
+  relay_ssh sudo install -o root -g root -m 0755 "${remote_temporary}" "${REMOTE_PATH}"
+  relay_ssh rm -f "${remote_temporary}"
   log "installed ${REMOTE_PATH} on ${SSH_HOST}"
 }
 
