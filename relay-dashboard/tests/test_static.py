@@ -46,6 +46,14 @@ class RouteDialogMarkupTests(unittest.TestCase):
             self.assertEqual(button.get("type"), "submit")
             self.assertIn("formnovalidate", button)
 
+    def test_hidden_elements_are_never_overridden_by_component_display(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        styles = (project_root / "relay-dashboard/static/styles.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("[hidden] {\n  display: none !important;\n}", styles)
+
 
 if __name__ == "__main__":
     unittest.main()

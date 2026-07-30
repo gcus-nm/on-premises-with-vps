@@ -229,7 +229,11 @@ async function createPlan() {
     showPlan(payload.plan);
     await loadState();
   } catch (error) {
-    toast(firstLine(error.message), true);
+    showInfo(
+      "TERRAFORM ERROR",
+      "planに失敗しました",
+      `<pre>${escapeHtml(error.message)}</pre>`,
+    );
   } finally {
     setButtonBusy(button, false, "変更を確認");
   }

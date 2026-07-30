@@ -16,6 +16,7 @@ from dashboard.core import (
     TerraformManager,
     ValidationError,
     analyze_terraform_plan,
+    oci_config_status,
     parse_relay_routes,
     routes_fingerprint,
     validate_route_set,
@@ -241,6 +242,33 @@ class RelayScriptTests(unittest.TestCase):
                 capture.read_text(encoding="utf-8").splitlines()[:3],
                 ["-F", str(ssh_config), "oci-relay"],
             )
+
+
+class OciConfigTests(unittest.TestCase):
+    def test_accepts_complete_default_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config"
+            config.write_text(
+                "[DEFAULT]\n"
+                "tenancy=ocid1.tenancy.example\n"
+                "user=ocid1.user.example\n"
+                "fingerprint=00:11\n"
+                "region=ap-tokyo-1\n"
+                "key_file=/run/relay-home/.oci/oci_api_key.pem\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(oci_config_status(config), (True, "DEFAULTを読込可能"))
+
+    def test_rejects_empty_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config"
+            config.write_text("", encoding="utf-8")
+
+            ok, detail = oci_config_status(config)
+
+            self.assertFalse(ok)
+            self.assertIn("DEFAULTに必須項目がありません", detail)
 
 
 class TerraformPlanAnalysisTests(unittest.TestCase):

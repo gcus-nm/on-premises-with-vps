@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string]$OciConfigPath = (Join-Path $env:USERPROFILE ".oci\config"),
+    [string]$OciConfigProfile = "DEFAULT",
     [string]$OciPrivateKeyPath = "",
     [string]$SshPrivateKeyPath = (Join-Path $env:USERPROFILE ".ssh\oci-relay"),
     [string]$RelayAddress = "10.99.0.1",
@@ -28,23 +29,45 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($Path, $Content, $Encoding)
 }
 
-function Resolve-KeyPathFromConfig {
-    param([string]$ConfigPath)
+function Get-OciProfileSettings {
+    param(
+        [string]$ConfigPath,
+        [string]$Profile
+    )
 
+    $Settings = @{}
+    $CurrentProfile = ""
     foreach ($Line in Get-Content -LiteralPath $ConfigPath) {
-        if ($Line -match "^\s*key_file\s*=\s*(.+?)\s*$") {
-            $Value = $Matches[1].Trim().Trim('"').Trim("'")
-            $Value = [Environment]::ExpandEnvironmentVariables($Value)
-            if ($Value.StartsWith("~/") -or $Value.StartsWith("~\")) {
-                return Join-Path $env:USERPROFILE $Value.Substring(2)
-            }
-            if (-not [System.IO.Path]::IsPathRooted($Value)) {
-                return Join-Path (Split-Path -Parent $ConfigPath) $Value
-            }
-            return $Value
+        $Trimmed = $Line.Trim()
+        if ($Trimmed -match "^\[(.+)\]$") {
+            $CurrentProfile = $Matches[1]
+            continue
+        }
+        if (
+            $CurrentProfile -eq $Profile -and
+            $Trimmed -match "^([^#;][^=]*?)\s*=\s*(.*?)\s*$"
+        ) {
+            $Settings[$Matches[1].Trim().ToLowerInvariant()] = $Matches[2].Trim()
         }
     }
-    throw "OCI configにkey_fileが見つかりません。-OciPrivateKeyPathで秘密鍵を指定してください。"
+    return $Settings
+}
+
+function Resolve-KeyPathFromConfig {
+    param(
+        [string]$ConfigPath,
+        [hashtable]$Settings
+    )
+
+    $Value = $Settings["key_file"].Trim().Trim('"').Trim("'")
+    $Value = [Environment]::ExpandEnvironmentVariables($Value)
+    if ($Value.StartsWith("~/") -or $Value.StartsWith("~\")) {
+        return Join-Path $env:USERPROFILE $Value.Substring(2)
+    }
+    if (-not [System.IO.Path]::IsPathRooted($Value)) {
+        return Join-Path (Split-Path -Parent $ConfigPath) $Value
+    }
+    return $Value
 }
 
 foreach ($Command in @("ssh-keyscan", "ssh-keygen")) {
@@ -56,8 +79,27 @@ foreach ($Command in @("ssh-keyscan", "ssh-keygen")) {
 if (-not (Test-Path -LiteralPath $OciConfigPath -PathType Leaf)) {
     throw "OCI configが見つかりません: $OciConfigPath"
 }
+$OciSettings = Get-OciProfileSettings `
+    -ConfigPath $OciConfigPath `
+    -Profile $OciConfigProfile
+$RequiredOciSettings = @("tenancy", "user", "fingerprint", "region", "key_file")
+$MissingOciSettings = @(
+    $RequiredOciSettings |
+        Where-Object {
+            -not $OciSettings.ContainsKey($_) -or
+            [string]::IsNullOrWhiteSpace([string]$OciSettings[$_])
+        }
+)
+if ($MissingOciSettings.Count -gt 0) {
+    throw "OCI configの[$OciConfigProfile]に必須項目がありません: $($MissingOciSettings -join ', ')"
+}
+if ($OciConfigProfile -ne "DEFAULT") {
+    throw "Terraformバックエンドで使用するOCI profileはDEFAULTにしてください。現在値: $OciConfigProfile"
+}
 if ([string]::IsNullOrWhiteSpace($OciPrivateKeyPath)) {
-    $OciPrivateKeyPath = Resolve-KeyPathFromConfig -ConfigPath $OciConfigPath
+    $OciPrivateKeyPath = Resolve-KeyPathFromConfig `
+        -ConfigPath $OciConfigPath `
+        -Settings $OciSettings
 }
 if (-not (Test-Path -LiteralPath $OciPrivateKeyPath -PathType Leaf)) {
     throw "OCI API秘密鍵が見つかりません: $OciPrivateKeyPath"
