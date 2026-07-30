@@ -19,8 +19,10 @@ from typing import Any, Callable, Iterable
 
 
 ROUTE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,27}$")
+GROUP_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,17}$")
 MANAGED_ROUTE_PREFIX = "ui-"
 PROTECTED_PUBLIC_PORTS = {22, 51820}
+MAX_BULK_PORTS = 64
 ALLOWED_TERRAFORM_PREFIXES = (
     "oci_core_network_security_group_security_rule.public_tcp[",
     "oci_core_network_security_group_security_rule.public_udp[",
@@ -113,10 +115,22 @@ class RouteRecord:
     route: Route
     applied_route: Route | None
     desired_active: bool
+    group_id: str | None
+    desired_enabled: bool
+    applied_enabled: bool
     created_at: str
     updated_at: str
     applied_at: str | None = None
     deleted_at: str | None = None
+
+
+@dataclass(frozen=True)
+class GroupRecord:
+    id: str
+    name: str
+    description: str
+    created_at: str
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -162,6 +176,71 @@ def parse_port(value: Any, label: str) -> int:
     if str(value).strip() != str(port) or not 1 <= port <= 65535:
         raise ValidationError(f"{label}は1〜65535の整数にしてください。")
     return port
+
+
+def parse_port_expression(value: Any, limit: int = MAX_BULK_PORTS) -> list[int]:
+    expression = str(value or "").strip()
+    if not expression:
+        raise ValidationError("ポート番号または範囲を入力してください。")
+
+    ports: list[int] = []
+    seen: set[int] = set()
+    for raw_token in expression.split(","):
+        token = raw_token.strip()
+        if not token:
+            raise ValidationError("ポート指定に空の要素があります。")
+        if "-" in token:
+            parts = [part.strip() for part in token.split("-")]
+            if len(parts) != 2 or not all(parts):
+                raise ValidationError(f"ポート範囲の形式が不正です: {token}")
+            start = parse_port(parts[0], "範囲の開始ポート")
+            end = parse_port(parts[1], "範囲の終了ポート")
+            if start > end:
+                raise ValidationError(f"ポート範囲は昇順にしてください: {token}")
+            expanded = range(start, end + 1)
+        else:
+            expanded = (parse_port(token, "ポート"),)
+
+        for port in expanded:
+            if port in PROTECTED_PUBLIC_PORTS:
+                raise ValidationError(
+                    f"公開ポート{port}はSSHまたはWireGuard用のため管理画面では使用できません。"
+                )
+            if port in seen:
+                raise ValidationError(f"ポート{port}が重複しています。")
+            seen.add(port)
+            ports.append(port)
+            if len(ports) > limit:
+                raise ValidationError(f"一度に追加できるポートは最大{limit}件です。")
+    return sorted(ports)
+
+
+def compact_port_ranges(ports: Iterable[int]) -> list[dict[str, int]]:
+    ordered = sorted(set(ports))
+    if not ordered:
+        return []
+    ranges: list[dict[str, int]] = []
+    start = previous = ordered[0]
+    for port in ordered[1:]:
+        if port == previous + 1:
+            previous = port
+            continue
+        ranges.append({"min": start, "max": previous})
+        start = previous = port
+    ranges.append({"min": start, "max": previous})
+    return ranges
+
+
+def normalize_group(name: Any, description: Any = "") -> tuple[str, str]:
+    normalized_name = str(name or "").strip().lower()
+    normalized_description = str(description or "").strip()
+    if not GROUP_NAME_PATTERN.fullmatch(normalized_name):
+        raise ValidationError(
+            "グループ名は小文字英数字で始まる1〜18文字とし、ハイフンだけを追加で使用できます。"
+        )
+    if len(normalized_description) > 120:
+        raise ValidationError("グループの説明は120文字以内にしてください。")
+    return normalized_name, normalized_description
 
 
 def validate_route_set(routes: Iterable[Route]) -> list[Route]:
@@ -251,6 +330,9 @@ def analyze_terraform_plan(plan: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_UNCHANGED = object()
+
+
 class RouteStore:
     def __init__(
         self,
@@ -269,24 +351,33 @@ class RouteStore:
         return [
             record.route
             for record in self.records()
-            if record.desired_active and record.deleted_at is None
+            if (
+                record.desired_active
+                and record.desired_enabled
+                and record.deleted_at is None
+            )
         ]
 
     def applied(self) -> list[Route]:
         return [
             record.applied_route
             for record in self.records()
-            if record.applied_route is not None
+            if record.applied_enabled and record.applied_route is not None
         ]
 
     def records(self) -> list[RouteRecord]:
         with self.lock:
-            records, _ = self._load()
+            records, _, _ = self._load()
             return records
+
+    def groups(self) -> list[GroupRecord]:
+        with self.lock:
+            _, groups, _ = self._load()
+            return groups
 
     def views(self) -> list[dict[str, Any]]:
         with self.lock:
-            records, pending_relay = self._load()
+            records, _, pending_relay = self._load()
             pending_ids = self._pending_record_ids(pending_relay)
             return [
                 self._record_view(record, record.id in pending_ids)
@@ -294,6 +385,7 @@ class RouteStore:
                     records,
                     key=lambda item: (
                         item.deleted_at is not None,
+                        item.group_id or "",
                         item.route.protocol,
                         item.route.public_port,
                         item.route.name,
@@ -301,77 +393,231 @@ class RouteStore:
                 )
             ]
 
-    def create(self, route: Route) -> RouteRecord:
+    def group_views(self) -> list[dict[str, Any]]:
         with self.lock:
-            records, pending_relay = self._load()
+            records, groups, _ = self._load()
+            views: list[dict[str, Any]] = []
+            for group in sorted(groups, key=lambda item: item.name):
+                members = [
+                    record
+                    for record in records
+                    if (
+                        record.group_id == group.id
+                        and record.desired_active
+                        and record.deleted_at is None
+                    )
+                ]
+                enabled_count = sum(record.desired_enabled for record in members)
+                if not members:
+                    enabled_state = "empty"
+                elif enabled_count == len(members):
+                    enabled_state = "enabled"
+                elif enabled_count == 0:
+                    enabled_state = "disabled"
+                else:
+                    enabled_state = "mixed"
+                views.append(
+                    {
+                        **asdict(group),
+                        "total_ports": len(members),
+                        "enabled_ports": enabled_count,
+                        "enabled_state": enabled_state,
+                    }
+                )
+            return views
+
+    def create(
+        self,
+        route: Route,
+        group_id: str | None = None,
+        desired_enabled: bool = True,
+    ) -> RouteRecord:
+        with self.lock:
+            records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
-            if any(
-                existing.deleted_at is None
-                and existing.desired_active
-                and existing.route.name == route.name
-                for existing in records
-            ):
-                raise ConflictError(f"経路名は既に使用されています: {route.name}")
+            self._validate_group_reference(groups, group_id)
+            if not isinstance(desired_enabled, bool):
+                raise ValidationError("有効状態はtrueまたはfalseで指定してください。")
             now = utc_now()
             record = RouteRecord(
                 id=str(uuid.uuid4()),
                 route=route,
                 applied_route=None,
                 desired_active=True,
+                group_id=group_id,
+                desired_enabled=desired_enabled,
+                applied_enabled=False,
                 created_at=now,
                 updated_at=now,
             )
             records.append(record)
-            self._save(records, pending_relay)
+            self._save(records, groups, pending_relay)
             return record
 
-    def update(self, record_id: str, route: Route) -> RouteRecord:
+    def update(
+        self,
+        record_id: str,
+        route: Route,
+        group_id: str | None | object = _UNCHANGED,
+    ) -> RouteRecord:
         with self.lock:
-            records, pending_relay = self._load()
+            records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
             target = self._find(records, record_id)
             if target.deleted_at is not None or not target.desired_active:
                 raise DashboardError("削除待ちまたは削除済みの経路は編集できません。")
-            if route.name != target.route.name and any(
-                existing.id != record_id
-                and existing.deleted_at is None
-                and existing.desired_active
-                and existing.route.name == route.name
-                for existing in records
-            ):
-                raise ConflictError(f"経路名は既に使用されています: {route.name}")
-            updated = replace(target, route=route, updated_at=utc_now())
+            resolved_group = target.group_id if group_id is _UNCHANGED else group_id
+            if resolved_group is not None and not isinstance(resolved_group, str):
+                raise ValidationError("所属グループの指定が不正です。")
+            self._validate_group_reference(groups, resolved_group)
+            updated = replace(
+                target,
+                route=route,
+                group_id=resolved_group,
+                updated_at=utc_now(),
+            )
             records = [updated if item.id == record_id else item for item in records]
-            self._save(records, pending_relay)
+            self._save(records, groups, pending_relay)
             return updated
+
+    def set_enabled(self, record_id: str, enabled: bool) -> RouteRecord:
+        if not isinstance(enabled, bool):
+            raise ValidationError("有効状態はtrueまたはfalseで指定してください。")
+        with self.lock:
+            records, groups, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            target = self._find(records, record_id)
+            if target.deleted_at is not None or not target.desired_active:
+                raise DashboardError("削除待ちまたは削除済みの経路は切り替えできません。")
+            updated = replace(target, desired_enabled=enabled, updated_at=utc_now())
+            records = [updated if item.id == record_id else item for item in records]
+            self._save(records, groups, pending_relay)
+            return updated
+
+    def create_group(
+        self,
+        name: Any,
+        description: Any = "",
+        members: Any = None,
+    ) -> GroupRecord:
+        normalized_name, normalized_description = normalize_group(name, description)
+        with self.lock:
+            records, groups, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            self._ensure_group_name_available(groups, normalized_name)
+            now = utc_now()
+            group = GroupRecord(
+                id=str(uuid.uuid4()),
+                name=normalized_name,
+                description=normalized_description,
+                created_at=now,
+                updated_at=now,
+            )
+            groups.append(group)
+            if members is not None:
+                records.extend(self._expand_group_members(group, members))
+            self._save(records, groups, pending_relay)
+            return group
+
+    def add_group_routes(self, group_id: str, members: Any) -> list[RouteRecord]:
+        with self.lock:
+            records, groups, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            group = self._find_group(groups, group_id)
+            created = self._expand_group_members(group, members)
+            records.extend(created)
+            self._save(records, groups, pending_relay)
+            return created
+
+    def update_group(self, group_id: str, name: Any, description: Any = "") -> GroupRecord:
+        normalized_name, normalized_description = normalize_group(name, description)
+        with self.lock:
+            records, groups, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            target = self._find_group(groups, group_id)
+            self._ensure_group_name_available(groups, normalized_name, excluded_id=group_id)
+            updated = replace(
+                target,
+                name=normalized_name,
+                description=normalized_description,
+                updated_at=utc_now(),
+            )
+            groups = [updated if item.id == group_id else item for item in groups]
+            self._save(records, groups, pending_relay)
+            return updated
+
+    def set_group_enabled(self, group_id: str, enabled: bool) -> list[RouteRecord]:
+        if not isinstance(enabled, bool):
+            raise ValidationError("有効状態はtrueまたはfalseで指定してください。")
+        with self.lock:
+            records, groups, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            self._find_group(groups, group_id)
+            now = utc_now()
+            updated_records = [
+                replace(record, desired_enabled=enabled, updated_at=now)
+                if (
+                    record.group_id == group_id
+                    and record.desired_active
+                    and record.deleted_at is None
+                )
+                else record
+                for record in records
+            ]
+            self._save(updated_records, groups, pending_relay)
+            return [
+                record
+                for record in updated_records
+                if (
+                    record.group_id == group_id
+                    and record.desired_active
+                    and record.deleted_at is None
+                )
+            ]
+
+    def delete_group(self, group_id: str) -> None:
+        with self.lock:
+            records, groups, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            self._find_group(groups, group_id)
+            records = [
+                replace(record, group_id=None, updated_at=utc_now())
+                if record.group_id == group_id
+                else record
+                for record in records
+            ]
+            groups = [group for group in groups if group.id != group_id]
+            self._save(records, groups, pending_relay)
 
     def delete(self, record_id: str) -> bool:
         with self.lock:
-            records, pending_relay = self._load()
+            records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
             target = self._find(records, record_id)
             if target.deleted_at is not None:
                 raise DashboardError("削除済み履歴は履歴消去を使用してください。")
-            if target.applied_route is None:
-                self._save([item for item in records if item.id != record_id], pending_relay)
+            if target.applied_route is None and not target.applied_enabled:
+                self._save(
+                    [item for item in records if item.id != record_id],
+                    groups,
+                    pending_relay,
+                )
                 return True
-            pending_delete = RouteRecord(
-                id=target.id,
-                route=target.applied_route,
-                applied_route=target.applied_route,
+            pending_delete = replace(
+                target,
+                route=target.applied_route or target.route,
                 desired_active=False,
-                created_at=target.created_at,
+                desired_enabled=False,
                 updated_at=utc_now(),
-                applied_at=target.applied_at,
                 deleted_at=None,
             )
             records = [pending_delete if item.id == record_id else item for item in records]
-            self._save(records, pending_relay)
+            self._save(records, groups, pending_relay)
             return False
 
     def cancel_delete(self, record_id: str) -> RouteRecord:
         with self.lock:
-            records, pending_relay = self._load()
+            records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
             target = self._find(records, record_id)
             if target.deleted_at is not None or target.desired_active or target.applied_route is None:
@@ -380,64 +626,74 @@ class RouteStore:
                 target,
                 route=target.applied_route,
                 desired_active=True,
+                desired_enabled=target.applied_enabled,
                 updated_at=utc_now(),
             )
             records = [restored if item.id == record_id else item for item in records]
-            self._save(records, pending_relay)
+            self._save(records, groups, pending_relay)
             return restored
 
     def purge_deleted(self, record_id: str) -> None:
         with self.lock:
-            records, pending_relay = self._load()
+            records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
             target = self._find(records, record_id)
             if target.deleted_at is None:
                 raise DashboardError("削除済みの経路だけ履歴から消去できます。")
-            self._save([item for item in records if item.id != record_id], pending_relay)
+            self._save(
+                [item for item in records if item.id != record_id],
+                groups,
+                pending_relay,
+            )
 
     def has_pending_relay(self) -> bool:
         with self.lock:
-            _, pending_relay = self._load()
+            _, _, pending_relay = self._load()
             return pending_relay is not None
 
     def mark_terraform_applied(self) -> None:
         with self.lock:
-            records, pending_relay = self._load()
+            records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
             pending_relay = {
                 "created_at": utc_now(),
                 "active": [
                     {"id": record.id, "route": asdict(record.route)}
                     for record in records
-                    if record.desired_active and record.deleted_at is None
+                    if (
+                        record.desired_active
+                        and record.desired_enabled
+                        and record.deleted_at is None
+                    )
                 ],
-                "deleted_ids": [
-                    record.id
-                    for record in records
-                    if not record.desired_active
-                    and record.deleted_at is None
-                    and record.applied_route is not None
-                ],
-                "changed_ids": [
+                "disabled_ids": [
                     record.id
                     for record in records
                     if (
                         record.desired_active
+                        and not record.desired_enabled
                         and record.deleted_at is None
-                        and record.route != record.applied_route
+                        and record.applied_enabled
                     )
-                    or (
+                ],
+                "deleted_ids": [
+                    record.id
+                    for record in records
+                    if (
                         not record.desired_active
                         and record.deleted_at is None
                         and record.applied_route is not None
                     )
                 ],
+                "changed_ids": [
+                    record.id for record in records if self._record_has_pending_change(record)
+                ],
             }
-            self._save(records, pending_relay)
+            self._save(records, groups, pending_relay)
 
     def relay_sync_routes(self) -> list[Route]:
         with self.lock:
-            _, pending_relay = self._load()
+            _, _, pending_relay = self._load()
             if pending_relay is None:
                 return self.applied()
             return [
@@ -447,7 +703,7 @@ class RouteStore:
 
     def commit_relay_sync(self) -> None:
         with self.lock:
-            records, pending_relay = self._load()
+            records, groups, pending_relay = self._load()
             if pending_relay is None:
                 return
             now = utc_now()
@@ -455,6 +711,7 @@ class RouteStore:
                 str(item["id"]): self._route_from_mapping(item["route"])
                 for item in pending_relay.get("active", [])
             }
+            disabled_ids = {str(item) for item in pending_relay.get("disabled_ids", [])}
             deleted_ids = {str(item) for item in pending_relay.get("deleted_ids", [])}
             committed: list[RouteRecord] = []
             for record in records:
@@ -465,6 +722,18 @@ class RouteStore:
                             route=active[record.id],
                             applied_route=active[record.id],
                             desired_active=True,
+                            desired_enabled=True,
+                            applied_enabled=True,
+                            updated_at=now,
+                            applied_at=now,
+                        )
+                    )
+                elif record.id in disabled_ids:
+                    committed.append(
+                        replace(
+                            record,
+                            desired_enabled=False,
+                            applied_enabled=False,
                             updated_at=now,
                             applied_at=now,
                         )
@@ -475,33 +744,45 @@ class RouteStore:
                             record,
                             applied_route=None,
                             desired_active=False,
+                            desired_enabled=False,
+                            applied_enabled=False,
                             updated_at=now,
                             deleted_at=now,
                         )
                     )
                 else:
                     committed.append(record)
-            self._save(committed, None)
+            self._save(committed, groups, None)
 
-    def _load(self) -> tuple[list[RouteRecord], dict[str, Any] | None]:
+    def _load(
+        self,
+    ) -> tuple[list[RouteRecord], list[GroupRecord], dict[str, Any] | None]:
         if not self.path.exists():
-            return [], None
+            return [], [], None
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
-            if value.get("version") == 1:
-                return self._migrate_v1(value), None
-            if value.get("version") != 2:
+            version = value.get("version")
+            if version == 1:
+                return self._migrate_v1(value)
+            if version == 2:
+                return self._migrate_v2(value)
+            if version != 3:
                 raise DashboardError("未対応の経路データ形式です。")
             records = [self._record_from_mapping(item) for item in value.get("records", [])]
-            self._validate_records(records)
+            groups = [self._group_from_mapping(item) for item in value.get("groups", [])]
             pending_relay = value.get("pending_relay")
             if pending_relay is not None and not isinstance(pending_relay, dict):
                 raise DashboardError("リレー同期待ちデータが不正です。")
-            return records, pending_relay
+            self._validate_records(records, groups)
+            return records, groups, pending_relay
         except (OSError, json.JSONDecodeError, TypeError, KeyError) as exc:
             raise DashboardError(f"経路データを読み込めません: {exc}") from exc
 
-    def _migrate_v1(self, value: dict[str, Any]) -> list[RouteRecord]:
+    def _migrate_v1(
+        self,
+        value: dict[str, Any],
+    ) -> tuple[list[RouteRecord], list[GroupRecord], None]:
+        self._backup_legacy(1)
         now = utc_now()
         routes = [self._route_from_mapping(item) for item in value.get("routes", [])]
         validate_route_set(routes)
@@ -511,14 +792,36 @@ class RouteStore:
                 route=route,
                 applied_route=route,
                 desired_active=True,
+                group_id=None,
+                desired_enabled=True,
+                applied_enabled=True,
                 created_at=now,
                 updated_at=now,
                 applied_at=now,
             )
             for route in routes
         ]
-        self._save(records, None)
-        return records
+        self._save(records, [], None)
+        return records, [], None
+
+    def _migrate_v2(
+        self,
+        value: dict[str, Any],
+    ) -> tuple[list[RouteRecord], list[GroupRecord], dict[str, Any] | None]:
+        self._backup_legacy(2)
+        records = [self._record_from_v2_mapping(item) for item in value.get("records", [])]
+        pending_relay = value.get("pending_relay")
+        if pending_relay is not None and not isinstance(pending_relay, dict):
+            raise DashboardError("リレー同期待ちデータが不正です。")
+        self._save(records, [], pending_relay)
+        return records, [], pending_relay
+
+    def _backup_legacy(self, version: int) -> None:
+        backup = self.data_dir / f"routes.json.v{version}.bak"
+        if backup.exists():
+            return
+        shutil.copy2(self.path, backup)
+        os.chmod(backup, 0o600)
 
     def _route_from_mapping(self, value: dict[str, Any]) -> Route:
         return Route.from_mapping(
@@ -538,16 +841,117 @@ class RouteStore:
                 else None
             ),
             desired_active=bool(value["desired_active"]),
+            group_id=str(value["group_id"]) if value.get("group_id") else None,
+            desired_enabled=bool(value["desired_enabled"]),
+            applied_enabled=bool(value["applied_enabled"]),
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
             applied_at=str(value["applied_at"]) if value.get("applied_at") else None,
             deleted_at=str(value["deleted_at"]) if value.get("deleted_at") else None,
         )
 
-    def _validate_records(self, records: list[RouteRecord]) -> None:
+    def _record_from_v2_mapping(self, value: dict[str, Any]) -> RouteRecord:
+        applied_value = value.get("applied_route")
+        applied_route = (
+            self._route_from_mapping(applied_value)
+            if isinstance(applied_value, dict)
+            else None
+        )
+        desired_active = bool(value["desired_active"])
+        deleted_at = str(value["deleted_at"]) if value.get("deleted_at") else None
+        return RouteRecord(
+            id=str(value["id"]),
+            route=self._route_from_mapping(value["route"]),
+            applied_route=applied_route,
+            desired_active=desired_active,
+            group_id=None,
+            desired_enabled=desired_active and deleted_at is None,
+            applied_enabled=applied_route is not None and deleted_at is None,
+            created_at=str(value["created_at"]),
+            updated_at=str(value["updated_at"]),
+            applied_at=str(value["applied_at"]) if value.get("applied_at") else None,
+            deleted_at=deleted_at,
+        )
+
+    @staticmethod
+    def _group_from_mapping(value: dict[str, Any]) -> GroupRecord:
+        name, description = normalize_group(value["name"], value.get("description", ""))
+        return GroupRecord(
+            id=str(value["id"]),
+            name=name,
+            description=description,
+            created_at=str(value["created_at"]),
+            updated_at=str(value["updated_at"]),
+        )
+
+    def _expand_group_members(
+        self,
+        group: GroupRecord,
+        members: Any,
+    ) -> list[RouteRecord]:
+        if not isinstance(members, list):
+            raise ValidationError("ポート定義は配列で指定してください。")
+        now = utc_now()
+        created: list[RouteRecord] = []
+        total = 0
+        for index, member in enumerate(members, start=1):
+            if not isinstance(member, dict):
+                raise ValidationError(f"{index}行目のポート定義が不正です。")
+            protocol = str(member.get("protocol", "")).strip().lower()
+            if protocol not in {"tcp", "udp"}:
+                raise ValidationError(f"{index}行目のプロトコルを選択してください。")
+            ports = parse_port_expression(member.get("ports"))
+            total += len(ports)
+            if total > MAX_BULK_PORTS:
+                raise ValidationError(
+                    f"一度に追加できるポートは合計{MAX_BULK_PORTS}件です。"
+                )
+            for port in ports:
+                route = self._route_from_mapping(
+                    {
+                        "name": f"{group.name}-{protocol}-{port}",
+                        "protocol": protocol,
+                        "public_port": port,
+                        "target_address": member.get("target_address"),
+                        "target_port": port,
+                        "description": member.get("description", ""),
+                    }
+                )
+                created.append(
+                    RouteRecord(
+                        id=str(uuid.uuid4()),
+                        route=route,
+                        applied_route=None,
+                        desired_active=True,
+                        group_id=group.id,
+                        desired_enabled=True,
+                        applied_enabled=False,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+        return created
+
+    def _validate_records(
+        self,
+        records: list[RouteRecord],
+        groups: list[GroupRecord],
+    ) -> None:
         ids = [record.id for record in records]
         if len(ids) != len(set(ids)):
             raise DashboardError("経路IDが重複しています。")
+        group_ids = [group.id for group in groups]
+        if len(group_ids) != len(set(group_ids)):
+            raise DashboardError("グループIDが重複しています。")
+        group_names = [group.name for group in groups]
+        if len(group_names) != len(set(group_names)):
+            raise ConflictError("グループ名が重複しています。")
+        available_groups = set(group_ids)
+        if any(
+            record.group_id is not None and record.group_id not in available_groups
+            for record in records
+        ):
+            raise DashboardError("存在しないグループを参照する経路があります。")
         validate_route_set(
             record.route
             for record in records
@@ -557,13 +961,16 @@ class RouteStore:
     def _save(
         self,
         records: Iterable[RouteRecord],
+        groups: Iterable[GroupRecord],
         pending_relay: dict[str, Any] | None,
     ) -> None:
-        materialized = list(records)
-        self._validate_records(materialized)
+        materialized_records = list(records)
+        materialized_groups = list(groups)
+        self._validate_records(materialized_records, materialized_groups)
         payload = {
-            "version": 2,
-            "records": [asdict(record) for record in materialized],
+            "version": 3,
+            "groups": [asdict(group) for group in materialized_groups],
+            "records": [asdict(record) for record in materialized_records],
             "pending_relay": pending_relay,
         }
         atomic_write_json(self.path, payload, mode=0o600)
@@ -574,6 +981,30 @@ class RouteStore:
             if record.id == record_id:
                 return record
         raise DashboardError(f"経路が見つかりません: {record_id}")
+
+    @staticmethod
+    def _find_group(groups: list[GroupRecord], group_id: str) -> GroupRecord:
+        for group in groups:
+            if group.id == group_id:
+                return group
+        raise DashboardError(f"グループが見つかりません: {group_id}")
+
+    @staticmethod
+    def _ensure_group_name_available(
+        groups: list[GroupRecord],
+        name: str,
+        excluded_id: str | None = None,
+    ) -> None:
+        if any(group.name == name and group.id != excluded_id for group in groups):
+            raise ConflictError(f"グループ名は既に使用されています: {name}")
+
+    @staticmethod
+    def _validate_group_reference(
+        groups: list[GroupRecord],
+        group_id: str | None,
+    ) -> None:
+        if group_id is not None and not any(group.id == group_id for group in groups):
+            raise ValidationError("所属グループが見つかりません。")
 
     @staticmethod
     def _require_mutable(pending_relay: dict[str, Any] | None) -> None:
@@ -590,8 +1021,19 @@ class RouteStore:
             return {str(item) for item in pending_relay.get("changed_ids", [])}
         return {
             *(str(item["id"]) for item in pending_relay.get("active", [])),
+            *(str(item) for item in pending_relay.get("disabled_ids", [])),
             *(str(item) for item in pending_relay.get("deleted_ids", [])),
         }
+
+    @staticmethod
+    def _record_has_pending_change(record: RouteRecord) -> bool:
+        if record.deleted_at is not None:
+            return False
+        if not record.desired_active:
+            return record.applied_route is not None
+        if record.desired_enabled:
+            return not record.applied_enabled or record.route != record.applied_route
+        return record.applied_enabled
 
     def _record_view(self, record: RouteRecord, relay_pending: bool) -> dict[str, Any]:
         if record.deleted_at is not None:
@@ -603,18 +1045,28 @@ class RouteStore:
         elif not record.desired_active:
             state = "pending_delete"
             group = "pending"
-        elif record.applied_route is None:
-            state = "pending_create"
-            group = "pending"
-        elif record.route != record.applied_route:
-            state = "pending_update"
+        elif record.desired_enabled:
+            if not record.applied_enabled:
+                state = "pending_create" if record.applied_route is None else "pending_enable"
+                group = "pending"
+            elif record.route != record.applied_route:
+                state = "pending_update"
+                group = "pending"
+            else:
+                state = "enabled"
+                group = "enabled"
+        elif record.applied_enabled:
+            state = "pending_disable"
             group = "pending"
         else:
-            state = "applied"
-            group = "applied"
+            state = "disabled"
+            group = "disabled"
         return {
             "id": record.id,
             **asdict(record.route),
+            "group_id": record.group_id,
+            "desired_enabled": record.desired_enabled,
+            "applied_enabled": record.applied_enabled,
             "state": state,
             "state_group": group,
             "created_at": record.created_at,
@@ -886,11 +1338,11 @@ class TerraformManager:
     def write_var_file(self, routes: Iterable[Route]) -> None:
         validated = validate_route_set(routes)
         payload = {
-            "dashboard_public_tcp_ports": sorted(
-                {route.public_port for route in validated if route.protocol == "tcp"}
+            "dashboard_public_tcp_port_ranges": compact_port_ranges(
+                route.public_port for route in validated if route.protocol == "tcp"
             ),
-            "dashboard_public_udp_ports": sorted(
-                {route.public_port for route in validated if route.protocol == "udp"}
+            "dashboard_public_udp_port_ranges": compact_port_ranges(
+                route.public_port for route in validated if route.protocol == "udp"
             ),
         }
         atomic_write_json(self.var_file, payload, mode=0o600)

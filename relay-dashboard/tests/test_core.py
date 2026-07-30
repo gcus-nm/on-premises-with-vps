@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -16,7 +17,9 @@ from dashboard.core import (
     TerraformManager,
     ValidationError,
     analyze_terraform_plan,
+    compact_port_ranges,
     oci_config_status,
+    parse_port_expression,
     parse_relay_routes,
     routes_fingerprint,
     validate_route_set,
@@ -80,6 +83,43 @@ class RouteValidationTests(unittest.TestCase):
         )
 
 
+class PortExpressionTests(unittest.TestCase):
+    def test_parses_numbers_ranges_and_whitespace(self) -> None:
+        self.assertEqual(
+            parse_port_expression(" 8000-8003, 8080,9000-9001 "),
+            [8000, 8001, 8002, 8003, 8080, 9000, 9001],
+        )
+
+    def test_rejects_invalid_duplicate_and_protected_ports(self) -> None:
+        for expression in (
+            "",
+            "8000,,8001",
+            "8010-8000",
+            "8000-8002,8001",
+            "0",
+            "65536",
+            "22",
+            "51820",
+        ):
+            with self.subTest(expression=expression), self.assertRaises(ValidationError):
+                parse_port_expression(expression)
+
+    def test_enforces_64_port_limit(self) -> None:
+        self.assertEqual(len(parse_port_expression("1000-1063")), 64)
+        with self.assertRaises(ValidationError):
+            parse_port_expression("1000-1064")
+
+    def test_compacts_contiguous_ports(self) -> None:
+        self.assertEqual(
+            compact_port_ranges([8000, 8001, 8002, 8004, 9000, 9000]),
+            [
+                {"min": 8000, "max": 8002},
+                {"min": 8004, "max": 8004},
+                {"min": 9000, "max": 9000},
+            ],
+        )
+
+
 class RouteStoreTests(unittest.TestCase):
     def test_unapplied_create_update_and_delete_cancel(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -96,7 +136,7 @@ class RouteStoreTests(unittest.TestCase):
             self.assertTrue(cancelled)
             self.assertEqual(store.list(), [])
             payload = json.loads((Path(directory) / "routes.json").read_text())
-            self.assertEqual(payload["version"], 2)
+            self.assertEqual(payload["version"], 3)
             self.assertEqual(payload["records"], [])
 
     def test_migrates_v1_routes_as_applied(self) -> None:
@@ -110,8 +150,11 @@ class RouteStoreTests(unittest.TestCase):
             store = RouteStore(Path(directory))
             views = store.views()
 
-            self.assertEqual(views[0]["state"], "applied")
-            self.assertEqual(json.loads(path.read_text())["version"], 2)
+            self.assertEqual(views[0]["state"], "enabled")
+            self.assertEqual(json.loads(path.read_text())["version"], 3)
+            backup = Path(directory) / "routes.json.v1.bak"
+            self.assertTrue(backup.is_file())
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
 
     def test_applied_update_delete_restore_and_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -120,17 +163,17 @@ class RouteStoreTests(unittest.TestCase):
             store.mark_terraform_applied()
             self.assertEqual(store.views()[0]["state"], "pending_relay")
             store.commit_relay_sync()
-            self.assertEqual(store.views()[0]["state"], "applied")
+            self.assertEqual(store.views()[0]["state"], "enabled")
 
             store.update(created.id, route(target_port=41409))
             self.assertEqual(store.views()[0]["state"], "pending_update")
             store.update(created.id, route())
-            self.assertEqual(store.views()[0]["state"], "applied")
+            self.assertEqual(store.views()[0]["state"], "enabled")
 
             self.assertFalse(store.delete(created.id))
             self.assertEqual(store.views()[0]["state"], "pending_delete")
             store.cancel_delete(created.id)
-            self.assertEqual(store.views()[0]["state"], "applied")
+            self.assertEqual(store.views()[0]["state"], "enabled")
 
             store.delete(created.id)
             store.mark_terraform_applied()
@@ -175,7 +218,7 @@ class RouteStoreTests(unittest.TestCase):
             states = {item["name"]: item["state"] for item in store.views()}
 
             self.assertEqual(states["minecraft"], "pending_relay")
-            self.assertEqual(states["unchanged"], "applied")
+            self.assertEqual(states["unchanged"], "enabled")
 
     def test_uses_configured_wireguard_network_when_reloading(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -198,6 +241,188 @@ class RouteStoreTests(unittest.TestCase):
             store.create(custom_route)
 
             self.assertEqual(store.list()[0].target_address, "10.42.0.2")
+
+    def test_enable_disable_state_machine_and_listener_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RouteStore(Path(directory))
+            created = store.create(route())
+            store.set_enabled(created.id, False)
+            self.assertEqual(store.views()[0]["state"], "disabled")
+            self.assertEqual(store.list(), [])
+            with self.assertRaises(ConflictError):
+                store.create(route(name="duplicate"))
+
+            store.set_enabled(created.id, True)
+            self.assertEqual(store.views()[0]["state"], "pending_create")
+            store.mark_terraform_applied()
+            store.commit_relay_sync()
+            self.assertEqual(store.views()[0]["state"], "enabled")
+
+            store.set_enabled(created.id, False)
+            self.assertEqual(store.views()[0]["state"], "pending_disable")
+            store.set_enabled(created.id, True)
+            self.assertEqual(store.views()[0]["state"], "enabled")
+            store.set_enabled(created.id, False)
+            store.mark_terraform_applied()
+            store.commit_relay_sync()
+            self.assertEqual(store.views()[0]["state"], "disabled")
+            self.assertEqual(store.applied(), [])
+            store.set_enabled(created.id, True)
+            self.assertEqual(store.views()[0]["state"], "pending_enable")
+
+    def test_creates_mixed_protocol_group_and_bulk_toggles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RouteStore(Path(directory))
+            group = store.create_group(
+                "game",
+                "ゲーム用",
+                [
+                    {
+                        "protocol": "tcp",
+                        "ports": "8000-8015",
+                        "target_address": "10.99.0.2",
+                    },
+                    {
+                        "protocol": "udp",
+                        "ports": "9000",
+                        "target_address": "10.99.0.2",
+                    },
+                ],
+            )
+
+            self.assertEqual(len(store.views()), 17)
+            self.assertEqual(store.views()[0]["group_id"], group.id)
+            self.assertEqual(store.group_views()[0]["enabled_state"], "enabled")
+            self.assertEqual(
+                {item["protocol"] for item in store.views()},
+                {"tcp", "udp"},
+            )
+
+            store.set_group_enabled(group.id, False)
+            self.assertTrue(
+                all(item["state"] == "disabled" for item in store.views())
+            )
+            self.assertEqual(store.group_views()[0]["enabled_state"], "disabled")
+            store.set_enabled(store.records()[0].id, True)
+            self.assertEqual(store.group_views()[0]["enabled_state"], "mixed")
+
+    def test_bulk_group_creation_is_atomic_on_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RouteStore(Path(directory))
+            store.create(route(public_port=8000))
+
+            with self.assertRaises(ConflictError):
+                store.create_group(
+                    "game",
+                    members=[
+                        {
+                            "protocol": "tcp",
+                            "ports": "8000-8001",
+                            "target_address": "10.99.0.2",
+                        }
+                    ],
+                )
+
+            self.assertEqual(store.group_views(), [])
+            self.assertEqual(len(store.views()), 1)
+
+    def test_existing_route_can_move_groups_without_renaming(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RouteStore(Path(directory))
+            created = store.create(route())
+            store.mark_terraform_applied()
+            store.commit_relay_sync()
+            group = store.create_group("game")
+
+            updated = store.update(created.id, route(), group.id)
+
+            self.assertEqual(updated.route.name, "minecraft")
+            self.assertEqual(store.views()[0]["group_id"], group.id)
+            self.assertEqual(store.views()[0]["state"], "enabled")
+
+    def test_migrates_v2_pending_relay_and_creates_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "routes.json"
+            route_value = route().__dict__
+            stable_value = route(name="stable", public_port=25566).__dict__
+            deleting_value = route(name="deleting", public_port=25567).__dict__
+            deleted_value = route(name="deleted", public_port=25568).__dict__
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "records": [
+                            {
+                                "id": "route-id",
+                                "route": route_value,
+                                "applied_route": route_value,
+                                "desired_active": True,
+                                "created_at": "2026-01-01T00:00:00+00:00",
+                                "updated_at": "2026-01-01T00:00:00+00:00",
+                                "applied_at": "2026-01-01T00:00:00+00:00",
+                                "deleted_at": None,
+                            },
+                            {
+                                "id": "stable-id",
+                                "route": stable_value,
+                                "applied_route": stable_value,
+                                "desired_active": True,
+                                "created_at": "2026-01-01T00:00:00+00:00",
+                                "updated_at": "2026-01-01T00:00:00+00:00",
+                                "applied_at": "2026-01-01T00:00:00+00:00",
+                                "deleted_at": None,
+                            },
+                            {
+                                "id": "deleting-id",
+                                "route": deleting_value,
+                                "applied_route": deleting_value,
+                                "desired_active": False,
+                                "created_at": "2026-01-01T00:00:00+00:00",
+                                "updated_at": "2026-01-01T00:00:00+00:00",
+                                "applied_at": "2026-01-01T00:00:00+00:00",
+                                "deleted_at": None,
+                            },
+                            {
+                                "id": "deleted-id",
+                                "route": deleted_value,
+                                "applied_route": None,
+                                "desired_active": False,
+                                "created_at": "2026-01-01T00:00:00+00:00",
+                                "updated_at": "2026-01-01T00:00:00+00:00",
+                                "applied_at": "2026-01-01T00:00:00+00:00",
+                                "deleted_at": "2026-01-02T00:00:00+00:00",
+                            }
+                        ],
+                        "pending_relay": {
+                            "active": [
+                                {"id": "route-id", "route": route_value},
+                                {"id": "stable-id", "route": stable_value},
+                            ],
+                            "deleted_ids": ["deleting-id"],
+                            "changed_ids": ["route-id"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            store = RouteStore(Path(directory))
+
+            states = {item["name"]: item["state"] for item in store.views()}
+            self.assertEqual(
+                states,
+                {
+                    "minecraft": "pending_relay",
+                    "stable": "enabled",
+                    "deleting": "pending_delete",
+                    "deleted": "deleted",
+                },
+            )
+            self.assertTrue(store.has_pending_relay())
+            backup = Path(directory) / "routes.json.v2.bak"
+            self.assertTrue(backup.is_file())
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+            self.assertEqual(json.loads(path.read_text())["version"], 3)
 
 
 class RelayParsingTests(unittest.TestCase):
@@ -413,6 +638,29 @@ class TerraformPlanAnalysisTests(unittest.TestCase):
                 str(manager.runtime_home),
             )
             self.assertTrue((Path(data_directory) / "tmp").is_dir())
+
+    def test_writes_compacted_protocol_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as data_directory:
+            manager = TerraformManager(Path(source_directory), Path(data_directory))
+            manager.write_var_file(
+                [
+                    route(name="tcp-one", public_port=8000),
+                    route(name="tcp-two", public_port=8001),
+                    route(name="tcp-four", public_port=8003),
+                    route(name="udp-one", protocol="udp", public_port=9000),
+                ]
+            )
+
+            payload = json.loads(manager.var_file.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                payload["dashboard_public_tcp_port_ranges"],
+                [{"min": 8000, "max": 8001}, {"min": 8003, "max": 8003}],
+            )
+            self.assertEqual(
+                payload["dashboard_public_udp_port_ranges"],
+                [{"min": 9000, "max": 9000}],
+            )
 
 
 if __name__ == "__main__":
