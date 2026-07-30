@@ -266,7 +266,9 @@ docker compose `
   down
 ```
 
-経路、操作履歴、Terraform Providerキャッシュは`onprem-relay-dashboard-data`ボリュームへ保存されます。OCI・SSH資格情報はコンテナ起動ごとにtmpfsへコピーされ、コンテナ停止時に消えます。
+経路、操作履歴、Terraform ProviderキャッシュとProvider取得時の一時ファイルは
+`onprem-relay-dashboard-data`ボリュームへ保存されます。OCI・SSH資格情報は
+コンテナ起動ごとにtmpfsへコピーされ、コンテナ停止時に消えます。
 
 次の操作は管理画面データを削除するため、通常は実行しないでください。
 

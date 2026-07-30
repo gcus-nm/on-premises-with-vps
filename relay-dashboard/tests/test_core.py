@@ -319,6 +319,11 @@ class TerraformPlanAnalysisTests(unittest.TestCase):
             self.assertTrue((manager.workspace / "versions.tf").is_file())
             self.assertTrue((manager.workspace / "terraform.tfvars").is_file())
             self.assertFalse((manager.workspace / "unrelated.txt").exists())
+            self.assertEqual(
+                manager._environment()["TMPDIR"],
+                str(Path(data_directory) / "tmp"),
+            )
+            self.assertTrue((Path(data_directory) / "tmp").is_dir())
 
 
 if __name__ == "__main__":
