@@ -385,7 +385,7 @@ class RelayManager:
         environment = child_process_environment()
         environment["WG_RELAY_SSH_HOST"] = self.ssh_host
         result = self.runner(
-            [str(self.script), *arguments],
+            ["bash", str(self.script), *arguments],
             environment,
             self.script.parent.parent,
             self.timeout,

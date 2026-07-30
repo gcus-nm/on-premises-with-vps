@@ -36,7 +36,7 @@ install -m 0600 "${SOURCE_ROOT}/ssh/config" "${RUNTIME_HOME}/.ssh/config"
 install -m 0600 "${SOURCE_ROOT}/ssh/oci-relay" "${RUNTIME_HOME}/.ssh/oci-relay"
 install -m 0600 "${SOURCE_ROOT}/ssh/known_hosts" "${RUNTIME_HOME}/.ssh/known_hosts"
 sed 's/\r$//' "${SOURCE_RELAY_SCRIPT}" >"${RUNTIME_RELAY_SCRIPT}"
-chmod 0700 "${RUNTIME_RELAY_SCRIPT}"
+chmod 0600 "${RUNTIME_RELAY_SCRIPT}"
 
 export HOME="${RUNTIME_HOME}"
 export RELAY_SCRIPT="${RUNTIME_RELAY_SCRIPT}"
