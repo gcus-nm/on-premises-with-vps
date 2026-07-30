@@ -131,6 +131,7 @@ class GroupRecord:
     id: str
     name: str
     description: str
+    parent_id: str | None
     created_at: str
     updated_at: str
 
@@ -610,11 +611,12 @@ class RouteStore:
             records, groups, _ = self._load()
             views: list[dict[str, Any]] = []
             for group in sorted(groups, key=lambda item: item.name):
+                descendant_ids = self._group_descendant_ids(groups, group.id)
                 members = [
                     record
                     for record in records
                     if (
-                        record.group_id == group.id
+                        record.group_id in descendant_ids
                         and record.desired_active
                         and record.deleted_at is None
                     )
@@ -711,17 +713,22 @@ class RouteStore:
         name: Any,
         description: Any = "",
         members: Any = None,
+        parent_id: str | None = None,
     ) -> GroupRecord:
         normalized_name, normalized_description = normalize_group(name, description)
         with self.lock:
             records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
             self._ensure_group_name_available(groups, normalized_name)
+            if parent_id is not None and not isinstance(parent_id, str):
+                raise ValidationError("親グループの指定が不正です。")
+            self._validate_group_parent(groups, None, parent_id)
             now = utc_now()
             group = GroupRecord(
                 id=str(uuid.uuid4()),
                 name=normalized_name,
                 description=normalized_description,
+                parent_id=parent_id,
                 created_at=now,
                 updated_at=now,
             )
@@ -741,17 +748,28 @@ class RouteStore:
             self._save(records, groups, pending_relay)
             return created
 
-    def update_group(self, group_id: str, name: Any, description: Any = "") -> GroupRecord:
+    def update_group(
+        self,
+        group_id: str,
+        name: Any,
+        description: Any = "",
+        parent_id: str | None | object = _UNCHANGED,
+    ) -> GroupRecord:
         normalized_name, normalized_description = normalize_group(name, description)
         with self.lock:
             records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
             target = self._find_group(groups, group_id)
             self._ensure_group_name_available(groups, normalized_name, excluded_id=group_id)
+            resolved_parent = target.parent_id if parent_id is _UNCHANGED else parent_id
+            if resolved_parent is not None and not isinstance(resolved_parent, str):
+                raise ValidationError("親グループの指定が不正です。")
+            self._validate_group_parent(groups, group_id, resolved_parent)
             updated = replace(
                 target,
                 name=normalized_name,
                 description=normalized_description,
+                parent_id=resolved_parent,
                 updated_at=utc_now(),
             )
             groups = [updated if item.id == group_id else item for item in groups]
@@ -765,11 +783,12 @@ class RouteStore:
             records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
             self._find_group(groups, group_id)
+            descendant_ids = self._group_descendant_ids(groups, group_id)
             now = utc_now()
             updated_records = [
                 replace(record, desired_enabled=enabled, updated_at=now)
                 if (
-                    record.group_id == group_id
+                    record.group_id in descendant_ids
                     and record.desired_active
                     and record.deleted_at is None
                 )
@@ -781,7 +800,7 @@ class RouteStore:
                 record
                 for record in updated_records
                 if (
-                    record.group_id == group_id
+                    record.group_id in descendant_ids
                     and record.desired_active
                     and record.deleted_at is None
                 )
@@ -791,14 +810,20 @@ class RouteStore:
         with self.lock:
             records, groups, pending_relay = self._load()
             self._require_mutable(pending_relay)
-            self._find_group(groups, group_id)
+            target = self._find_group(groups, group_id)
             records = [
-                replace(record, group_id=None, updated_at=utc_now())
+                replace(record, group_id=target.parent_id, updated_at=utc_now())
                 if record.group_id == group_id
                 else record
                 for record in records
             ]
-            groups = [group for group in groups if group.id != group_id]
+            groups = [
+                replace(group, parent_id=target.parent_id, updated_at=utc_now())
+                if group.parent_id == group_id
+                else group
+                for group in groups
+                if group.id != group_id
+            ]
             self._save(records, groups, pending_relay)
 
     def delete(self, record_id: str) -> bool:
@@ -978,7 +1003,9 @@ class RouteStore:
                 return self._migrate_v1(value)
             if version == 2:
                 return self._migrate_v2(value)
-            if version != 3:
+            if version == 3:
+                return self._migrate_v3(value)
+            if version != 4:
                 raise DashboardError("未対応の経路データ形式です。")
             records = [self._record_from_mapping(item) for item in value.get("records", [])]
             groups = [self._group_from_mapping(item) for item in value.get("groups", [])]
@@ -1027,6 +1054,20 @@ class RouteStore:
             raise DashboardError("リレー同期待ちデータが不正です。")
         self._save(records, [], pending_relay)
         return records, [], pending_relay
+
+    def _migrate_v3(
+        self,
+        value: dict[str, Any],
+    ) -> tuple[list[RouteRecord], list[GroupRecord], dict[str, Any] | None]:
+        self._backup_legacy(3)
+        records = [self._record_from_mapping(item) for item in value.get("records", [])]
+        groups = [self._group_from_mapping(item) for item in value.get("groups", [])]
+        pending_relay = value.get("pending_relay")
+        if pending_relay is not None and not isinstance(pending_relay, dict):
+            raise DashboardError("リレー同期待ちデータが不正です。")
+        self._validate_records(records, groups)
+        self._save(records, groups, pending_relay)
+        return records, groups, pending_relay
 
     def _backup_legacy(self, version: int) -> None:
         backup = self.data_dir / f"routes.json.v{version}.bak"
@@ -1092,6 +1133,7 @@ class RouteStore:
             id=str(value["id"]),
             name=name,
             description=description,
+            parent_id=str(value["parent_id"]) if value.get("parent_id") else None,
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
         )
@@ -1160,6 +1202,19 @@ class RouteStore:
             raise ConflictError("グループ名が重複しています。")
         available_groups = set(group_ids)
         if any(
+            group.parent_id is not None and group.parent_id not in available_groups
+            for group in groups
+        ):
+            raise DashboardError("存在しない親グループを参照するグループがあります。")
+        for group in groups:
+            visited = {group.id}
+            parent_id = group.parent_id
+            while parent_id is not None:
+                if parent_id in visited:
+                    raise DashboardError("グループ階層が循環しています。")
+                visited.add(parent_id)
+                parent_id = self._find_group(groups, parent_id).parent_id
+        if any(
             record.group_id is not None and record.group_id not in available_groups
             for record in records
         ):
@@ -1180,7 +1235,7 @@ class RouteStore:
         materialized_groups = list(groups)
         self._validate_records(materialized_records, materialized_groups)
         payload = {
-            "version": 3,
+            "version": 4,
             "groups": [asdict(group) for group in materialized_groups],
             "records": [asdict(record) for record in materialized_records],
             "pending_relay": pending_relay,
@@ -1209,6 +1264,41 @@ class RouteStore:
     ) -> None:
         if any(group.name == name and group.id != excluded_id for group in groups):
             raise ConflictError(f"グループ名は既に使用されています: {name}")
+
+    @classmethod
+    def _validate_group_parent(
+        cls,
+        groups: list[GroupRecord],
+        group_id: str | None,
+        parent_id: str | None,
+    ) -> None:
+        if parent_id is None:
+            return
+        cls._find_group(groups, parent_id)
+        if group_id is None:
+            return
+        if parent_id == group_id:
+            raise ValidationError("グループ自身を親グループにはできません。")
+        if parent_id in cls._group_descendant_ids(groups, group_id):
+            raise ValidationError("サブグループを親にすると階層が循環します。")
+
+    @staticmethod
+    def _group_descendant_ids(
+        groups: list[GroupRecord],
+        group_id: str,
+    ) -> set[str]:
+        descendants = {group_id}
+        pending = [group_id]
+        while pending:
+            parent_id = pending.pop()
+            children = [
+                group.id
+                for group in groups
+                if group.parent_id == parent_id and group.id not in descendants
+            ]
+            descendants.update(children)
+            pending.extend(children)
+        return descendants
 
     @staticmethod
     def _validate_group_reference(

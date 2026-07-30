@@ -615,7 +615,7 @@ td.description-cell {
 .group-header,
 .single-routes-heading {
   display: grid;
-  grid-template-columns: minmax(180px, 1.25fr) minmax(200px, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
   align-items: center;
   min-height: 72px;
@@ -625,6 +625,30 @@ td.description-cell {
 
 .single-routes-heading {
   grid-template-columns: 1fr;
+}
+
+.group-summary-button {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.25fr) minmax(200px, 1fr);
+  gap: 16px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px;
+  border: 0;
+  border-radius: 7px;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.group-summary-button:hover {
+  background: rgb(133 240 180 / 4%);
+}
+
+.group-summary-button:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-strong);
 }
 
 .group-identity {
@@ -640,6 +664,7 @@ td.description-cell {
 
 .group-identity small,
 .group-port-summary,
+.group-summary-meta small,
 .single-routes-heading small {
   display: block;
   overflow: hidden;
@@ -648,6 +673,10 @@ td.description-cell {
   line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.group-summary-meta {
+  min-width: 0;
 }
 
 .group-actions {
@@ -665,6 +694,25 @@ td.description-cell {
 
 .route-members {
   display: grid;
+}
+
+.group-contents {
+  display: grid;
+}
+
+.route-subgroups {
+  display: grid;
+  gap: 10px;
+  padding: 10px 10px 10px 24px;
+  background: rgb(0 0 0 / 8%);
+}
+
+.route-members + .route-subgroups {
+  border-top: 1px solid var(--line-soft);
+}
+
+.route-subgroups > .route-group {
+  border-left: 2px solid rgb(133 240 180 / 28%);
 }
 
 .route-item {
@@ -1257,6 +1305,10 @@ select:focus {
   margin-top: 20px;
 }
 
+.field-span {
+  grid-column: 1 / -1;
+}
+
 .dialog-actions {
   justify-content: flex-end;
   margin-top: 24px;
@@ -1526,8 +1578,16 @@ code {
     grid-template-columns: 1fr;
   }
 
+  .group-summary-button {
+    grid-template-columns: 1fr;
+  }
+
   .group-actions {
     justify-content: flex-start;
+  }
+
+  .route-subgroups {
+    padding-left: 14px;
   }
 
   .route-item {

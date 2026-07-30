@@ -143,7 +143,7 @@ class RouteStoreTests(unittest.TestCase):
             self.assertTrue(cancelled)
             self.assertEqual(store.list(), [])
             payload = json.loads((Path(directory) / "routes.json").read_text())
-            self.assertEqual(payload["version"], 3)
+            self.assertEqual(payload["version"], 4)
             self.assertEqual(payload["records"], [])
 
     def test_migrates_v1_routes_as_applied(self) -> None:
@@ -158,7 +158,7 @@ class RouteStoreTests(unittest.TestCase):
             views = store.views()
 
             self.assertEqual(views[0]["state"], "enabled")
-            self.assertEqual(json.loads(path.read_text())["version"], 3)
+            self.assertEqual(json.loads(path.read_text())["version"], 4)
             backup = Path(directory) / "routes.json.v1.bak"
             self.assertTrue(backup.is_file())
             self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
@@ -313,6 +313,59 @@ class RouteStoreTests(unittest.TestCase):
             store.set_enabled(store.records()[0].id, True)
             self.assertEqual(store.group_views()[0]["enabled_state"], "mixed")
 
+    def test_nested_groups_aggregate_toggle_and_promote_on_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RouteStore(Path(directory))
+            parent = store.create_group("games")
+            child = store.create_group(
+                "survival",
+                members=[
+                    {
+                        "protocol": "tcp",
+                        "ports": "25565",
+                        "target_address": "10.99.0.2",
+                    }
+                ],
+                parent_id=parent.id,
+            )
+            grandchild = store.create_group(
+                "voice",
+                members=[
+                    {
+                        "protocol": "udp",
+                        "ports": "24454",
+                        "target_address": "10.99.0.2",
+                    }
+                ],
+                parent_id=child.id,
+            )
+
+            groups = {group["name"]: group for group in store.group_views()}
+            self.assertEqual(groups["games"]["total_ports"], 2)
+            self.assertEqual(groups["survival"]["total_ports"], 2)
+            self.assertEqual(groups["voice"]["total_ports"], 1)
+            self.assertEqual(groups["survival"]["parent_id"], parent.id)
+
+            updated_child = store.update_group(child.id, "survival", "更新済み")
+            self.assertEqual(updated_child.parent_id, parent.id)
+            store.set_group_enabled(parent.id, False)
+            self.assertTrue(
+                all(item["state"] == "disabled" for item in store.views())
+            )
+            with self.assertRaises(ValidationError):
+                store.update_group(parent.id, "games", parent_id=grandchild.id)
+
+            store.delete_group(child.id)
+            promoted_groups = {
+                group["name"]: group for group in store.group_views()
+            }
+            self.assertEqual(promoted_groups["voice"]["parent_id"], parent.id)
+            route_groups = {
+                item["name"]: item["group_id"] for item in store.views()
+            }
+            self.assertEqual(route_groups["survival-tcp-25565"], parent.id)
+            self.assertEqual(route_groups["voice-udp-24454"], grandchild.id)
+
     def test_bulk_group_creation_is_atomic_on_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RouteStore(Path(directory))
@@ -429,7 +482,38 @@ class RouteStoreTests(unittest.TestCase):
             backup = Path(directory) / "routes.json.v2.bak"
             self.assertTrue(backup.is_file())
             self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
-            self.assertEqual(json.loads(path.read_text())["version"], 3)
+            self.assertEqual(json.loads(path.read_text())["version"], 4)
+
+    def test_migrates_v3_groups_to_parent_aware_format(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "routes.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "groups": [
+                            {
+                                "id": "group-id",
+                                "name": "game",
+                                "description": "ゲーム用",
+                                "created_at": "2026-01-01T00:00:00+00:00",
+                                "updated_at": "2026-01-01T00:00:00+00:00",
+                            }
+                        ],
+                        "records": [],
+                        "pending_relay": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            store = RouteStore(Path(directory))
+
+            self.assertIsNone(store.groups()[0].parent_id)
+            self.assertEqual(json.loads(path.read_text())["version"], 4)
+            backup = Path(directory) / "routes.json.v3.bak"
+            self.assertTrue(backup.is_file())
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
 
 
 class RelayParsingTests(unittest.TestCase):

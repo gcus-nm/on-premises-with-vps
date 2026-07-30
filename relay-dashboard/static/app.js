@@ -1,5 +1,7 @@
 "use strict";
 
+const collapsedGroupsStorageKey = "relay-dashboard:collapsed-groups:v1";
+
 const appState = {
   routes: [],
   groups: [],
@@ -9,7 +11,7 @@ const appState = {
   routeFilter: "all",
   pendingRelay: false,
   busy: false,
-  collapsedGroups: new Set(),
+  collapsedGroups: loadCollapsedGroups(),
   peers: [],
   accessRules: [],
   suggestedPeerAddress: "",
@@ -68,6 +70,7 @@ const elements = {
   groupId: document.querySelector("#group-id"),
   groupName: document.querySelector("#group-name"),
   groupDescription: document.querySelector("#group-description"),
+  groupParent: document.querySelector("#group-parent"),
   groupMemberRows: document.querySelector("#group-member-rows"),
   groupPortPreview: document.querySelector("#group-port-preview"),
   groupAdvanced: document.querySelector("#group-advanced"),
@@ -107,6 +110,40 @@ const elements = {
   toast: document.querySelector("#toast"),
 };
 
+function loadCollapsedGroups() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(collapsedGroupsStorageKey) || "[]");
+    return new Set(
+      Array.isArray(stored)
+        ? stored.filter((groupId) => typeof groupId === "string")
+        : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedGroups() {
+  try {
+    window.localStorage.setItem(
+      collapsedGroupsStorageKey,
+      JSON.stringify([...appState.collapsedGroups]),
+    );
+  } catch {
+    // ブラウザストレージが使えない環境でも、現在の画面内では折りたたみを維持する。
+  }
+}
+
+function pruneCollapsedGroups() {
+  const knownGroupIds = new Set(appState.groups.map((group) => group.id));
+  const pruned = new Set(
+    [...appState.collapsedGroups].filter((groupId) => knownGroupIds.has(groupId)),
+  );
+  if (pruned.size === appState.collapsedGroups.size) return;
+  appState.collapsedGroups = pruned;
+  saveCollapsedGroups();
+}
+
 async function api(path, options = {}) {
   const request = {
     method: options.method || "GET",
@@ -132,6 +169,7 @@ async function loadState() {
   const payload = await api("/api/state");
   appState.routes = payload.routes || [];
   appState.groups = payload.groups || [];
+  pruneCollapsedGroups();
   appState.plan = payload.plan;
   appState.audit = payload.audit || [];
   appState.csrfToken = payload.csrf_token;
@@ -314,14 +352,14 @@ function renderRoutes() {
   elements.emptyNewRoute.hidden = appState.routeFilter !== "all";
 
   const knownGroupIds = new Set(appState.groups.map((group) => group.id));
-  for (const group of appState.groups) {
-    const allMembers = appState.routes.filter((route) => route.group_id === group.id);
-    const members = visibleRoutes.filter((route) => route.group_id === group.id);
-    if (!members.length && appState.routeFilter !== "all") continue;
-    elements.routesBody.insertAdjacentHTML(
-      "beforeend",
-      renderGroup(group, allMembers, members),
-    );
+  const rootGroups = appState.groups.filter(
+    (group) => !group.parent_id || !knownGroupIds.has(group.parent_id),
+  );
+  const groupMarkup = rootGroups
+    .map((group) => renderGroupTree(group, visibleRoutes))
+    .join("");
+  if (groupMarkup) {
+    elements.routesBody.insertAdjacentHTML("beforeend", groupMarkup);
   }
 
   const ungrouped = visibleRoutes.filter(
@@ -345,7 +383,27 @@ function renderRoutes() {
   }
 }
 
-function renderGroup(group, allMembers, visibleMembers) {
+function renderGroupTree(group, visibleRoutes, depth = 0) {
+  const descendantIds = getGroupDescendantIds(group.id);
+  const allMembers = appState.routes.filter((route) =>
+    descendantIds.has(route.group_id),
+  );
+  const aggregateVisibleMembers = visibleRoutes.filter((route) =>
+    descendantIds.has(route.group_id),
+  );
+  if (!aggregateVisibleMembers.length && appState.routeFilter !== "all") return "";
+
+  const directVisibleMembers = visibleRoutes.filter(
+    (route) => route.group_id === group.id,
+  );
+  const childMarkup = appState.groups
+    .filter((candidate) => candidate.parent_id === group.id)
+    .map((child) => renderGroupTree(child, visibleRoutes, depth + 1))
+    .join("");
+  return renderGroup(group, allMembers, directVisibleMembers, childMarkup, depth);
+}
+
+function renderGroup(group, allMembers, visibleMembers, childMarkup, depth) {
   const collapsed = appState.collapsedGroups.has(group.id);
   const state = group.enabled_state === "empty" ? "disabled" : group.enabled_state;
   const toggleLabel =
@@ -355,17 +413,30 @@ function renderGroup(group, allMembers, visibleMembers) {
         ? "すべて有効。操作するとすべて無効になります"
         : "すべて無効。操作するとすべて有効になります";
   const locked = appState.pendingRelay || appState.busy || group.total_ports === 0;
+  const contentsId = `group-contents-${group.id}`;
   return `
-    <section class="route-group" data-group-card="${escapeAttribute(group.id)}">
+    <section
+      class="route-group"
+      data-group-card="${escapeAttribute(group.id)}"
+      data-group-depth="${depth}"
+    >
       <div class="group-header">
-        <div class="group-identity">
-          <strong>${escapeHtml(group.name)}</strong>
-          <small>${escapeHtml(group.description || "説明なし")}</small>
-        </div>
-        <div>
-          <span class="group-port-summary">${escapeHtml(formatGroupPorts(allMembers))}</span>
-          <small>${group.enabled_ports}/${group.total_ports} ポート有効</small>
-        </div>
+        <button
+          class="group-summary-button"
+          type="button"
+          aria-expanded="${String(!collapsed)}"
+          aria-controls="${escapeAttribute(contentsId)}"
+          data-group-collapse="${escapeAttribute(group.id)}"
+        >
+          <span class="group-identity">
+            <strong>${escapeHtml(group.name)}</strong>
+            <small>${escapeHtml(group.description || "説明なし")}</small>
+          </span>
+          <span class="group-summary-meta">
+            <span class="group-port-summary">${escapeHtml(formatGroupPorts(allMembers))}</span>
+            <small>${group.enabled_ports}/${group.total_ports} ポート有効</small>
+          </span>
+        </button>
         <div class="group-actions">
           <button
             class="toggle-button"
@@ -383,20 +454,42 @@ function renderGroup(group, allMembers, visibleMembers) {
             class="small-button collapse-button"
             type="button"
             aria-expanded="${String(!collapsed)}"
+            aria-controls="${escapeAttribute(contentsId)}"
             aria-label="${collapsed ? "グループを展開" : "グループを折りたたむ"}"
             data-group-collapse="${escapeAttribute(group.id)}"
           >${collapsed ? "＋" : "−"}</button>
         </div>
       </div>
-      <div class="route-members" ${collapsed ? "hidden" : ""}>
+      <div
+        class="group-contents"
+        id="${escapeAttribute(contentsId)}"
+        ${collapsed ? "hidden" : ""}
+      >
         ${
           visibleMembers.length
-            ? visibleMembers.map(renderRouteItem).join("")
-            : '<p class="muted">この条件に一致するポートはありません。</p>'
+            ? `<div class="route-members">${visibleMembers.map(renderRouteItem).join("")}</div>`
+            : childMarkup
+              ? ""
+              : '<p class="muted">このグループにポートはありません。</p>'
         }
+        ${childMarkup ? `<div class="route-subgroups">${childMarkup}</div>` : ""}
       </div>
     </section>
   `;
+}
+
+function getGroupDescendantIds(groupId) {
+  const descendants = new Set([groupId]);
+  const pending = [groupId];
+  while (pending.length) {
+    const parentId = pending.pop();
+    for (const group of appState.groups) {
+      if (group.parent_id !== parentId || descendants.has(group.id)) continue;
+      descendants.add(group.id);
+      pending.push(group.id);
+    }
+  }
+  return descendants;
 }
 
 function renderRouteItem(route) {
@@ -532,11 +625,42 @@ function refreshGroupOptions(selected = "") {
     ${appState.groups
       .map(
         (group) =>
-          `<option value="${escapeAttribute(group.id)}">${escapeHtml(group.name)}</option>`,
+          `<option value="${escapeAttribute(group.id)}">${escapeHtml(groupOptionLabel(group))}</option>`,
       )
       .join("")}
   `;
   elements.routeGroup.value = selected || "";
+}
+
+function groupOptionLabel(group) {
+  const names = [group.name];
+  const visited = new Set([group.id]);
+  let parentId = group.parent_id;
+  while (parentId && !visited.has(parentId)) {
+    const parent = appState.groups.find((candidate) => candidate.id === parentId);
+    if (!parent) break;
+    names.unshift(parent.name);
+    visited.add(parent.id);
+    parentId = parent.parent_id;
+  }
+  return names.join(" › ");
+}
+
+function refreshParentGroupOptions(selected = "", excludedGroupId = "") {
+  const excludedIds = excludedGroupId
+    ? getGroupDescendantIds(excludedGroupId)
+    : new Set();
+  elements.groupParent.innerHTML = `
+    <option value="">最上位グループ</option>
+    ${appState.groups
+      .filter((group) => !excludedIds.has(group.id))
+      .map(
+        (group) =>
+          `<option value="${escapeAttribute(group.id)}">${escapeHtml(groupOptionLabel(group))}</option>`,
+      )
+      .join("")}
+  `;
+  elements.groupParent.value = selected || "";
 }
 
 function openNewRoute() {
@@ -711,6 +835,7 @@ function openNewGroup() {
   elements.groupForm.reset();
   elements.groupId.value = "";
   elements.groupDialogTitle.textContent = "ポートグループを追加";
+  refreshParentGroupOptions();
   elements.groupAdvanced.hidden = true;
   elements.groupFormError.textContent = "";
   elements.groupMemberRows.replaceChildren();
@@ -728,6 +853,7 @@ function openEditGroup(id) {
   elements.groupId.value = group.id;
   elements.groupName.value = group.name;
   elements.groupDescription.value = group.description || "";
+  refreshParentGroupOptions(group.parent_id, group.id);
   elements.groupDialogTitle.textContent = "ポートグループを編集";
   elements.groupAdvanced.hidden = false;
   elements.groupFormError.textContent = "";
@@ -860,6 +986,7 @@ async function saveGroup() {
   const metadata = {
     name: elements.groupName.value,
     description: elements.groupDescription.value,
+    parent_id: elements.groupParent.value || null,
   };
   const button = document.querySelector("#save-group-button");
   setButtonBusy(button, true, "保存中…");
@@ -907,11 +1034,19 @@ async function toggleGroup(id) {
   }
 }
 
+function toggleGroupCollapse(id) {
+  if (!id) return;
+  if (appState.collapsedGroups.has(id)) appState.collapsedGroups.delete(id);
+  else appState.collapsedGroups.add(id);
+  saveCollapsedGroups();
+  renderRoutes();
+}
+
 async function deleteGroup() {
   const groupId = elements.groupId.value;
   const group = appState.groups.find((item) => item.id === groupId);
   if (!group) return;
-  if (!window.confirm(`グループ「${group.name}」を解除しますか？\n所属経路とOCI設定は削除されません。`)) {
+  if (!window.confirm(`グループ「${group.name}」を解除しますか？\n直下の経路とサブグループは1階層上へ移動し、OCI設定は削除されません。`)) {
     return;
   }
   try {
@@ -1380,16 +1515,11 @@ elements.routesBody.addEventListener("click", (event) => {
   const groupEdit = event.target.closest("[data-group-edit]");
   const groupToggle = event.target.closest("[data-group-toggle]");
   const collapse = event.target.closest("[data-group-collapse]");
-  if (routeEdit) openEditRoute(routeEdit.dataset.routeEdit);
-  if (routeToggle) toggleRoute(routeToggle.dataset.routeToggle);
-  if (groupEdit) openEditGroup(groupEdit.dataset.groupEdit);
-  if (groupToggle) toggleGroup(groupToggle.dataset.groupToggle);
-  if (collapse) {
-    const id = collapse.dataset.groupCollapse;
-    if (appState.collapsedGroups.has(id)) appState.collapsedGroups.delete(id);
-    else appState.collapsedGroups.add(id);
-    renderRoutes();
-  }
+  if (routeEdit) return openEditRoute(routeEdit.dataset.routeEdit);
+  if (routeToggle) return toggleRoute(routeToggle.dataset.routeToggle);
+  if (groupEdit) return openEditGroup(groupEdit.dataset.groupEdit);
+  if (groupToggle) return toggleGroup(groupToggle.dataset.groupToggle);
+  if (collapse) toggleGroupCollapse(collapse.dataset.groupCollapse);
 });
 
 elements.routeTabs.addEventListener("click", (event) => {

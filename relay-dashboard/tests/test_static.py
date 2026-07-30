@@ -72,8 +72,12 @@ class RouteDialogMarkupTests(unittest.TestCase):
         self.assertIn("高度な操作", javascript)
         self.assertIn("data-route-toggle", javascript)
         self.assertIn("data-group-toggle", javascript)
+        self.assertIn("data-group-collapse", javascript)
+        self.assertIn("window.localStorage", javascript)
+        self.assertIn("renderGroupTree", javascript)
         self.assertIn('pending_relay: "リレー同期待ち"', javascript)
         self.assertIn('id="group-dialog"', html)
+        self.assertIn('id="group-parent"', html)
         self.assertIn('id="route-advanced"', html)
 
     def test_wireguard_peer_and_access_management_are_present(self) -> None:

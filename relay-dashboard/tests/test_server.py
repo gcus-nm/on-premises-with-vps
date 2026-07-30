@@ -528,6 +528,69 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(refreshed["groups"], [])
         self.assertEqual(len(refreshed["routes"]), 1)  # type: ignore[arg-type]
 
+    def test_subgroup_api_aggregates_and_rejects_cycles(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        status, parent_state = self.request(
+            "/api/groups",
+            method="POST",
+            body={"name": "games", "members": []},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 201)
+        parent_id = str(parent_state["groups"][0]["id"])  # type: ignore[index]
+
+        status, nested_state = self.request(
+            "/api/groups",
+            method="POST",
+            body={
+                "name": "survival",
+                "parent_id": parent_id,
+                "members": [
+                    {
+                        "protocol": "tcp",
+                        "ports": "25565",
+                        "target_address": "10.99.0.2",
+                    }
+                ],
+            },
+            csrf=csrf,
+        )
+        self.assertEqual(status, 201)
+        groups = {
+            str(group["name"]): group for group in nested_state["groups"]  # type: ignore[union-attr]
+        }
+        child_id = str(groups["survival"]["id"])
+        self.assertEqual(groups["survival"]["parent_id"], parent_id)
+        self.assertEqual(groups["games"]["total_ports"], 1)
+
+        status, _ = self.request(
+            f"/api/groups/{parent_id}",
+            method="PUT",
+            body={"name": "games", "parent_id": child_id},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 400)
+
+        status, disabled = self.request(
+            f"/api/groups/{parent_id}/enabled",
+            method="PUT",
+            body={"enabled": False},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(disabled["routes"][0]["state"], "disabled")  # type: ignore[index]
+
+        status, promoted = self.request(
+            f"/api/groups/{parent_id}",
+            method="DELETE",
+            body={},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertIsNone(promoted["groups"][0]["parent_id"])  # type: ignore[index]
+        self.assertEqual(promoted["routes"][0]["group_id"], child_id)  # type: ignore[index]
+
 
 if __name__ == "__main__":
     unittest.main()
