@@ -43,6 +43,7 @@ generated/wireguard/
 # Local gateway hostnames and deployment overrides.
 gateway/.env
 gateway/mc-router/routes.json
+gateway/traefik/dynamic/ui-web-routes.yml
 
 # Relay dashboard credentials and local runtime overrides.
 relay-dashboard/.env

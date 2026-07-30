@@ -14,6 +14,7 @@ services:
       RELAY_ADDRESS: ${RELAY_ADDRESS:-10.99.0.1}
       DASHBOARD_WIREGUARD_TARGET: ${RELAY_DASHBOARD_WIREGUARD_TARGET:-10.99.0.2}
       DASHBOARD_EXTERNAL_PORT: ${RELAY_DASHBOARD_PORT:-41800}
+      TRAEFIK_DYNAMIC_CONFIG: /run/traefik-dynamic/ui-web-routes.yml
     ports:
       - "${RELAY_DASHBOARD_BIND_IP:-127.0.0.1}:${RELAY_DASHBOARD_PORT:-41800}:8080/tcp"
     volumes:
@@ -31,6 +32,7 @@ services:
       - ../scripts/wg-relay.sh:/workspace/scripts/wg-relay.sh:ro
       - ./secrets/oci:/run/relay-secrets/oci:ro
       - ./secrets/ssh:/run/relay-secrets/ssh:ro
+      - ../gateway/traefik/dynamic:/run/traefik-dynamic
       - relay-dashboard-data:/data
     tmpfs:
       - /tmp:size=32m,mode=1777

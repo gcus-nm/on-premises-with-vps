@@ -1013,9 +1013,122 @@ td.description-cell {
   color: var(--danger);
 }
 
+.web-section,
 .wireguard-section {
   margin-top: 28px;
+}
+
+.wireguard-section {
   padding-bottom: 56px;
+}
+
+.web-gateway-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
+  gap: 1px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px 3px 10px 3px;
+  background: var(--line);
+}
+
+.web-gateway-strip > div {
+  display: grid;
+  gap: 5px;
+  padding: 14px 16px;
+  background: #0d1916;
+}
+
+.web-gateway-strip > div span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+}
+
+.web-gateway-strip > div strong {
+  font-size: 12px;
+}
+
+.web-gateway-strip > .button {
+  margin: 10px;
+}
+
+.gateway-ready {
+  color: var(--accent);
+}
+
+.gateway-pending,
+.gateway-disabled {
+  color: var(--warning);
+}
+
+.gateway-conflict {
+  color: var(--danger);
+}
+
+.web-routes-panel {
+  overflow: hidden;
+}
+
+.web-route-list {
+  display: grid;
+}
+
+.web-route-list > .muted {
+  padding: 36px 24px;
+  text-align: center;
+}
+
+.web-route-item {
+  display: grid;
+  grid-template-columns:
+    minmax(140px, 0.9fr)
+    minmax(190px, 1.25fr)
+    20px
+    minmax(160px, 1fr)
+    minmax(100px, 0.65fr)
+    auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 66px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.web-route-item:last-child {
+  border-bottom: 0;
+}
+
+.web-route-item.state-pending_delete,
+.web-route-item.state-deleted,
+.web-route-item.state-disabled {
+  background: rgb(0 0 0 / 10%);
+}
+
+.web-hostname {
+  overflow: hidden;
+  color: var(--cyan);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.web-route-arrow {
+  color: var(--muted);
+  text-align: center;
+}
+
+.web-service-note {
+  margin: 10px 2px 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+.web-service-note code {
+  color: var(--text);
 }
 
 .section-heading {
@@ -1502,6 +1615,10 @@ code {
     grid-template-columns: 1fr;
   }
 
+  .web-gateway-strip {
+    grid-template-columns: 1fr 1fr;
+  }
+
   .side-stack {
     grid-template-columns: 1fr 1fr;
   }
@@ -1594,13 +1711,27 @@ code {
     grid-template-columns: 1fr 64px;
   }
 
-  .route-item > :not(.route-main, .route-controls) {
+  .route-item > :not(.route-main, .route-controls),
+  .web-route-item > :not(.route-main, .route-controls) {
     grid-column: 1 / -1;
   }
 
-  .route-controls {
+  .route-item .route-controls,
+  .web-route-item .route-controls {
     grid-column: 2;
     grid-row: 1;
+  }
+
+  .web-route-item {
+    grid-template-columns: 1fr auto;
+  }
+
+  .web-route-arrow {
+    display: none;
+  }
+
+  .web-gateway-strip {
+    grid-template-columns: 1fr;
   }
 
   .group-member-row {

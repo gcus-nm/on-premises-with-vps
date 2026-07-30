@@ -177,6 +177,73 @@
           </aside>
         </section>
 
+        <section class="web-section" aria-labelledby="web-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">HTTPS SERVICE ROUTING</p>
+              <h2 id="web-heading">Webサービス</h2>
+              <p>
+                ドメインをDockerサービスへHTTPSで振り分けます。
+                DNSとコンテナはホスト側で管理してください。
+              </p>
+            </div>
+            <div class="panel-actions">
+              <button class="button button-quiet" id="web-gateway-setup-button" type="button">
+                Web入口を準備
+              </button>
+              <button class="button button-primary" id="new-web-route-button" type="button">
+                ＋ Webルート
+              </button>
+            </div>
+          </div>
+
+          <div class="web-gateway-strip">
+            <div>
+              <span>OCI入口 TCP/80</span>
+              <strong id="web-gateway-80">未登録</strong>
+            </div>
+            <div>
+              <span>OCI入口 TCP/443</span>
+              <strong id="web-gateway-443">未登録</strong>
+            </div>
+            <div>
+              <span>Webルート</span>
+              <strong id="web-route-summary">0件・未反映0件</strong>
+            </div>
+            <button class="button button-plan" id="web-preview-button" type="button">
+              反映内容を確認
+            </button>
+          </div>
+
+          <article class="panel web-routes-panel">
+            <div class="route-tabs" id="web-route-tabs" role="tablist" aria-label="Webルート状態">
+              <button class="route-tab active" type="button" role="tab" aria-selected="true" data-web-route-filter="all">
+                すべて <span data-web-filter-count="all">0</span>
+              </button>
+              <button class="route-tab" type="button" role="tab" aria-selected="false" data-web-route-filter="enabled">
+                有効 <span data-web-filter-count="enabled">0</span>
+              </button>
+              <button class="route-tab" type="button" role="tab" aria-selected="false" data-web-route-filter="disabled">
+                無効 <span data-web-filter-count="disabled">0</span>
+              </button>
+              <button class="route-tab" type="button" role="tab" aria-selected="false" data-web-route-filter="pending">
+                未反映 <span data-web-filter-count="pending">0</span>
+              </button>
+              <button class="route-tab" type="button" role="tab" aria-selected="false" data-web-route-filter="deleted">
+                削除済み <span data-web-filter-count="deleted">0</span>
+              </button>
+            </div>
+            <div class="web-route-list" id="web-routes-body">
+              <p class="muted">Webルートはまだ登録されていません。</p>
+            </div>
+          </article>
+          <p class="web-service-note">
+            Relay Controlはコンテナを検出・起動しません。転送先が
+            <code>onprem-relay-ingress</code>に存在しない場合は
+            <code>502 Bad Gateway</code>になります。
+          </p>
+        </section>
+
         <section class="wireguard-section" aria-labelledby="wireguard-heading">
           <div class="section-heading">
             <div>
@@ -321,6 +388,87 @@
           <button class="button button-primary" id="save-route-button" type="button">保存</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="web-route-dialog">
+      <form method="dialog" id="web-route-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">WEB ROUTE EDITOR</p>
+            <h2 id="web-route-dialog-title">Webルートを追加</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="閉じる" type="submit" formnovalidate>×</button>
+        </div>
+        <input type="hidden" id="web-record-id">
+        <label>
+          <span>ルート名</span>
+          <input id="web-route-name" required maxlength="28" pattern="[a-z0-9][a-z0-9-]{0,27}" placeholder="app">
+          <small>小文字英数字とハイフン。Traefik内の識別名に使用します。</small>
+        </label>
+        <label>
+          <span>ドメイン（FQDN）</span>
+          <input id="web-route-hostname" required maxlength="253" placeholder="app.oci.aaa.mydns.jp" inputmode="url">
+          <small>MyDNSのAレコードは別途OCIの予約済みIPv4へ向けてください。</small>
+        </label>
+        <div class="field-grid">
+          <label>
+            <span>Dockerネットワークエイリアス</span>
+            <input id="web-route-alias" required maxlength="63" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="app-service">
+          </label>
+          <label>
+            <span>コンテナポート</span>
+            <input id="web-route-port" type="number" min="1" max="65535" required placeholder="8080">
+          </label>
+        </div>
+        <label>
+          <span>説明</span>
+          <input id="web-route-description" maxlength="120" placeholder="管理画面">
+        </label>
+        <details class="advanced-zone" id="web-route-advanced" hidden>
+          <summary>高度な操作</summary>
+          <p id="web-route-advanced-description">
+            Webルートを削除する場合だけ使用してください。通常は一覧のトグルで無効化します。
+          </p>
+          <button class="button button-danger" id="delete-web-route-button" type="button">
+            このWebルートを削除待ちにする
+          </button>
+        </details>
+        <p class="form-error" id="web-route-form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="button button-quiet" value="cancel" type="submit" formnovalidate>キャンセル</button>
+          <button class="button button-primary" id="save-web-route-button" type="button">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="web-publish-dialog" class="wide-dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">TRAEFIK REVIEW</p>
+          <h2>Webルートの反映内容</h2>
+        </div>
+        <button class="icon-button" id="close-web-publish-button" aria-label="閉じる" type="button">×</button>
+      </div>
+      <div id="web-publish-summary" class="plan-summary"></div>
+      <div id="web-publish-routes" class="check-list"></div>
+      <details>
+        <summary>生成するTraefik設定</summary>
+        <pre id="web-publish-config"></pre>
+      </details>
+      <p class="panel-note">
+        証明書取得にはMyDNSのAレコードとTCP/80・443の反映が必要です。
+        Traefikから転送先への通信はHTTPです。
+      </p>
+      <div class="confirm-zone">
+        <label>
+          <span>反映する場合は <code>PUBLISH</code> と入力</span>
+          <input id="web-publish-confirmation" autocomplete="off" spellcheck="false">
+        </label>
+        <button class="button button-primary" id="web-publish-confirm-button" type="button" disabled>
+          Traefikへ反映
+        </button>
+      </div>
+      <p class="form-error" id="web-publish-error" role="alert"></p>
     </dialog>
 
     <dialog id="group-dialog" class="wide-dialog">

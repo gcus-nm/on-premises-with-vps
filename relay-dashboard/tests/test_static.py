@@ -104,6 +104,41 @@ class RouteDialogMarkupTests(unittest.TestCase):
             self.assertIn(endpoint, javascript)
         self.assertIn("downloadClientConfig", javascript)
 
+    def test_web_route_management_and_safety_copy_are_present(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        html = (project_root / "relay-dashboard/static/index.html").read_text(
+            encoding="utf-8"
+        )
+        javascript = (project_root / "relay-dashboard/static/app.js").read_text(
+            encoding="utf-8"
+        )
+
+        public_position = html.index('id="route-tabs"')
+        web_position = html.index('id="web-heading"')
+        wireguard_position = html.index('id="wireguard-heading"')
+        self.assertLess(public_position, web_position)
+        self.assertLess(web_position, wireguard_position)
+        for route_filter in ("all", "enabled", "disabled", "pending", "deleted"):
+            self.assertIn(f'data-web-route-filter="{route_filter}"', html)
+        for element_id in (
+            "web-gateway-setup-button",
+            "web-route-dialog",
+            "web-publish-dialog",
+            "web-publish-confirmation",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        for endpoint in (
+            "/api/web-gateway/setup",
+            "/api/web-routes",
+            "/api/web-routes/preview",
+            "/api/web-routes/publish",
+            "/api/deleted-web-routes/",
+        ):
+            self.assertIn(endpoint, javascript)
+        self.assertIn("PUBLISH", html)
+        self.assertIn("502 Bad Gateway", html)
+        self.assertIn("onprem-relay-ingress", html)
+
 
 if __name__ == "__main__":
     unittest.main()

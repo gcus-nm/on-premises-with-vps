@@ -6,6 +6,7 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 
 - TerraformによるOCI Network Security Groupの公開ポート
 - `wg-relay`によるOCIからWireGuard PeerへのDNAT・SNAT
+- HTTPS Webルート（FQDNからDockerネットワークエイリアスへの振り分け）
 - WireGuard Peerの追加・鍵更新・削除
 - WireGuard Peer間のTCP/UDPアクセス制御
 
@@ -26,6 +27,8 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - コンテナ起動時に資格情報をtmpfsへコピーし、`0600`で使用する
 - 新規・更新したPeerの秘密鍵はディスクへ保存せず、一度だけブラウザへ返す
 - Docker socketはマウントしない
+- Traefik APIと証明書Volumeはマウントしない
+- Traefik動的設定ディレクトリではマーカー付き`ui-web-routes.yml`だけを更新する
 - Linux Capabilityをすべて削除する
 - 公開経路のGUI管理ルールには`ui-`を付け、既存の手動公開ルールを削除しない
 - Terraform planにNSG公開ルール以外の変更が含まれたらapplyを禁止する
@@ -44,10 +47,11 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - Peer間アクセスルールの追加、更新、削除
 - Terraform planとapply
 - OCIリレー状態、環境チェック、操作履歴
+- TCP/80・443のWeb入口下書きとTraefik Webルート
 
 管理対象外:
 
-- Dockerコンテナ自身のポート公開
+- Dockerコンテナの起動、更新、Volume、環境変数、ネットワーク接続
 - MyDNSのAレコード
 - Minecraftのmc-routerホスト名マッピング
 - `wg-relay`の初回インストール、初期化、サーバー鍵の再生成
@@ -200,6 +204,32 @@ Minecraft共通入口の場合:
 
 Minecraftのサブドメイン振り分けは、従来どおり`mc-route.ps1`で設定します。GUIのTCP/25565経路は、その手前のOCI公開入口を担当します。
 
+## Webサービスを公開する
+
+先に[GATEWAY.md](../GATEWAY.md)の手順で`gateway/.env`のACMEメールを設定し、Traefikと
+Relay Controlを再作成します。
+
+1. 「Web入口を準備」を選択する
+2. 公開経路の「変更を確認」でTCP/80・443だけが追加されることを確認する
+3. `APPLY`を入力してOCI NSGとリレーへ反映する
+4. 「＋ Webルート」から名前、FQDN、Dockerエイリアス、コンテナポート、説明を保存する
+5. 「反映内容を確認」でドメインと転送先、生成設定を確認する
+6. `PUBLISH`を入力してTraefikへ反映する
+7. MyDNSのAレコードをOCIの予約済みIPv4へ向け、外部回線からHTTPSを確認する
+
+Webルートの保存は下書きです。プレビュー後にルートを変更するとfingerprintが一致しない
+ため反映されず、確認をやり直す必要があります。設定ファイルの書き込み途中で失敗した場合は
+変更操作をロックし、「Webルートを再反映」で保存済みスナップショットを復旧します。
+
+初期版は1ドメインから1つのHTTPバックエンドだけを扱います。パス振り分け、複数
+バックエンド、ワイルドカード、上流HTTPSは対象外です。Relay ControlはDockerサービスを
+検出・起動しないため、対象サービスをホスト側Composeで`onprem-relay-ingress`へ接続し、
+登録したネットワークエイリアスで到達できるようにしてください。存在しない場合は
+`502 Bad Gateway`になります。
+
+MyDNS、コンテナ、Windows FirewallはWeb UIの管理対象外です。現在のIPv4転送を使用し、
+AAAAレコードは追加しません。OCIのSNATにより実クライアントIPはバックエンドへ渡りません。
+
 ## ポートの一括追加とグループ
 
 「グループ」を選ぶと、TCP/UDPを混在できるポートグループを作成できます。ポート欄は
@@ -256,7 +286,7 @@ Minecraftのサブドメイン振り分けは、従来どおり`mc-route.ps1`で
 無期限に残ります。「高度な操作」の「削除履歴を消去」はOCIやリレーを変更せず、
 その履歴だけを完全に消去します。
 
-既存のバージョン1・2形式の`routes.json`は初回読込時にバージョン3へ自動移行し、
+既存のバージョン1〜3形式の`routes.json`は初回読込時にバージョン4へ自動移行し、
 登録済み経路と反映状態を引き継ぎます。移行前データは`routes.json.v1.bak`または
 `routes.json.v2.bak`として権限`0600`で一度だけ保存します。アップデート前に削除
 された経路は復元できません。

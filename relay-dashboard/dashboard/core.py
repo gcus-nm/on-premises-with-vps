@@ -19,6 +19,8 @@ from typing import Any, Callable, Iterable
 
 
 ROUTE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,27}$")
+DOCKER_ALIAS_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 GROUP_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,17}$")
 WIREGUARD_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 EXISTING_WIREGUARD_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
@@ -118,6 +120,81 @@ class RouteRecord:
     applied_route: Route | None
     desired_active: bool
     group_id: str | None
+    desired_enabled: bool
+    applied_enabled: bool
+    created_at: str
+    updated_at: str
+    applied_at: str | None = None
+    deleted_at: str | None = None
+
+
+@dataclass(frozen=True)
+class WebRoute:
+    name: str
+    hostname: str
+    docker_alias: str
+    container_port: int
+    description: str = ""
+
+    @classmethod
+    def from_mapping(cls, value: dict[str, Any]) -> "WebRoute":
+        name = str(value.get("name", "")).strip().lower()
+        raw_hostname = str(value.get("hostname", "")).strip().lower()
+        if raw_hostname.endswith("."):
+            raw_hostname = raw_hostname[:-1]
+        docker_alias = str(value.get("docker_alias", "")).strip().lower()
+        description = str(value.get("description", "")).strip()
+
+        if not ROUTE_NAME_PATTERN.fullmatch(name):
+            raise ValidationError(
+                "名前は小文字英数字で始まる1〜28文字とし、ハイフンだけを追加で使用できます。"
+            )
+        if not raw_hostname or any(
+            token in raw_hostname for token in ("*", "/", ":", " ", "\t", "\n")
+        ):
+            raise ValidationError("ドメインにはポートやパスを含まないFQDNを入力してください。")
+        try:
+            hostname = raw_hostname.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValidationError("ドメインをFQDNとして解釈できません。") from exc
+        labels = hostname.split(".")
+        if (
+            len(labels) < 2
+            or len(hostname) > 253
+            or any(not DNS_LABEL_PATTERN.fullmatch(label) for label in labels)
+        ):
+            raise ValidationError("ドメインには有効なFQDNを入力してください。")
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            pass
+        else:
+            raise ValidationError("ドメインにはIPアドレスではなくFQDNを入力してください。")
+
+        if not DOCKER_ALIAS_PATTERN.fullmatch(docker_alias):
+            raise ValidationError(
+                "Dockerエイリアスは小文字英数字とハイフンを使用した1〜63文字にしてください。"
+            )
+        if docker_alias in {"localhost", "host", "traefik"}:
+            raise ValidationError("予約済みのDockerエイリアスは使用できません。")
+        if len(description) > 120:
+            raise ValidationError("説明は120文字以内にしてください。")
+
+        return cls(
+            name=name,
+            hostname=hostname,
+            docker_alias=docker_alias,
+            container_port=parse_port(value.get("container_port"), "コンテナポート"),
+            description=description,
+        )
+
+
+@dataclass(frozen=True)
+class WebRouteRecord:
+    id: str
+    route: WebRoute
+    applied_route: WebRoute | None
+    desired_active: bool
     desired_enabled: bool
     applied_enabled: bool
     created_at: str
@@ -707,6 +784,99 @@ class RouteStore:
             records = [updated if item.id == record_id else item for item in records]
             self._save(records, groups, pending_relay)
             return updated
+
+    def setup_web_gateway(self, target_address: str) -> list[RouteRecord]:
+        """Atomically stage TCP/80 and TCP/443 for the on-premises gateway."""
+        with self.lock:
+            records, groups, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            planned = list(records)
+            selected: list[RouteRecord] = []
+            now = utc_now()
+            for port, name, description in (
+                (80, "web-http", "Web HTTP入口（HTTPSへリダイレクト）"),
+                (443, "web-https", "Web HTTPS入口"),
+            ):
+                matches = [
+                    record
+                    for record in planned
+                    if (
+                        record.deleted_at is None
+                        and (
+                            (
+                                record.desired_active
+                                and record.route.protocol == "tcp"
+                                and record.route.public_port == port
+                            )
+                            or (
+                                not record.desired_active
+                                and record.applied_route is not None
+                                and record.applied_route.protocol == "tcp"
+                                and record.applied_route.public_port == port
+                            )
+                        )
+                    )
+                ]
+                if matches:
+                    existing = matches[0]
+                    candidate = (
+                        existing.route
+                        if existing.desired_active
+                        else existing.applied_route
+                    )
+                    assert candidate is not None
+                    if (
+                        candidate.target_address != target_address
+                        or candidate.target_port != port
+                    ):
+                        raise ConflictError(
+                            f"TCP/{port}は別の転送先"
+                            f"（{candidate.target_address}:{candidate.target_port}）"
+                            "で使用されています。"
+                        )
+                    updated = replace(
+                        existing,
+                        route=candidate,
+                        desired_active=True,
+                        desired_enabled=True,
+                        updated_at=now,
+                        deleted_at=None,
+                    )
+                    planned = [
+                        updated if item.id == existing.id else item
+                        for item in planned
+                    ]
+                    selected.append(updated)
+                    continue
+
+                candidate = Route.from_mapping(
+                    {
+                        "name": name,
+                        "protocol": "tcp",
+                        "public_port": port,
+                        "target_address": target_address,
+                        "target_port": port,
+                        "description": description,
+                    },
+                    relay_network=self.relay_network,
+                    relay_address=self.relay_address,
+                )
+                created = RouteRecord(
+                    id=str(uuid.uuid4()),
+                    route=candidate,
+                    applied_route=None,
+                    desired_active=True,
+                    group_id=None,
+                    desired_enabled=True,
+                    applied_enabled=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+                planned.append(created)
+                selected.append(created)
+
+            self._save(planned, groups, pending_relay)
+            return selected
 
     def create_group(
         self,
@@ -1378,6 +1548,636 @@ class RouteStore:
         }
 
 
+WEB_ROUTE_MARKER = "# Managed by OCI Relay Control. Do not edit directly."
+
+
+def web_routes_fingerprint(records: Iterable[WebRouteRecord]) -> str:
+    payload = [
+        {
+            "id": record.id,
+            "route": asdict(record.route),
+            "desired_active": record.desired_active,
+            "desired_enabled": record.desired_enabled,
+            "deleted_at": record.deleted_at,
+        }
+        for record in sorted(records, key=lambda item: item.id)
+    ]
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def render_web_routes_config(records: Iterable[WebRouteRecord]) -> str:
+    active = sorted(
+        (
+            record
+            for record in records
+            if (
+                record.desired_active
+                and record.desired_enabled
+                and record.deleted_at is None
+            )
+        ),
+        key=lambda item: (item.route.hostname, item.route.name, item.id),
+    )
+    lines = [
+        WEB_ROUTE_MARKER,
+        "# Generated from /data/web-routes.json. Changes will be overwritten.",
+        "http:",
+    ]
+    if not active:
+        lines.append("  routers: {}")
+    else:
+        lines.append("  routers:")
+        for record in active:
+            route = record.route
+            key = f"ui-web-{route.name}"
+            lines.extend(
+                [
+                    f"    {key}:",
+                    "      entryPoints:",
+                    "        - websecure",
+                    f"      rule: {json.dumps(f'Host(`{route.hostname}`)')}",
+                    f"      service: {key}",
+                    "      tls:",
+                    "        certResolver: letsencrypt",
+                ]
+            )
+    if not active:
+        lines.append("  services: {}")
+    else:
+        lines.append("  services:")
+        for record in active:
+            route = record.route
+            key = f"ui-web-{route.name}"
+            lines.extend(
+                [
+                    f"    {key}:",
+                    "      loadBalancer:",
+                    "        servers:",
+                    f"          - url: {json.dumps(f'http://{route.docker_alias}:{route.container_port}')}",
+                ]
+            )
+    return "\n".join(lines) + "\n"
+
+
+class WebRouteStore:
+    def __init__(self, data_dir: Path, dynamic_config_path: Path) -> None:
+        self.data_dir = data_dir
+        self.path = data_dir / "web-routes.json"
+        self.preview_path = data_dir / "web-plan.json"
+        self.dynamic_config_path = dynamic_config_path
+        self.lock = threading.RLock()
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+    def records(self) -> list[WebRouteRecord]:
+        with self.lock:
+            records, _ = self._load()
+            return records
+
+    def views(self) -> list[dict[str, Any]]:
+        with self.lock:
+            records, pending_publish = self._load()
+            pending_ids = {
+                str(item)
+                for item in (pending_publish or {}).get("changed_ids", [])
+            }
+            return [
+                self._record_view(record, record.id in pending_ids)
+                for record in sorted(
+                    records,
+                    key=lambda item: (
+                        item.deleted_at is not None,
+                        item.route.hostname,
+                        item.route.name,
+                    ),
+                )
+            ]
+
+    def create(
+        self,
+        route: WebRoute,
+        desired_enabled: bool = True,
+    ) -> WebRouteRecord:
+        if not isinstance(desired_enabled, bool):
+            raise ValidationError("有効状態はtrueまたはfalseで指定してください。")
+        with self.lock:
+            records, pending_publish = self._load()
+            self._require_mutable(pending_publish)
+            now = utc_now()
+            record = WebRouteRecord(
+                id=str(uuid.uuid4()),
+                route=route,
+                applied_route=None,
+                desired_active=True,
+                desired_enabled=desired_enabled,
+                applied_enabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+            records.append(record)
+            self._save(records, pending_publish)
+            return record
+
+    def update(self, record_id: str, route: WebRoute) -> WebRouteRecord:
+        with self.lock:
+            records, pending_publish = self._load()
+            self._require_mutable(pending_publish)
+            target = self._find(records, record_id)
+            if target.deleted_at is not None or not target.desired_active:
+                raise DashboardError("削除待ちまたは削除済みのWebルートは編集できません。")
+            updated = replace(target, route=route, updated_at=utc_now())
+            records = [updated if item.id == record_id else item for item in records]
+            self._save(records, pending_publish)
+            return updated
+
+    def set_enabled(self, record_id: str, enabled: bool) -> WebRouteRecord:
+        if not isinstance(enabled, bool):
+            raise ValidationError("有効状態はtrueまたはfalseで指定してください。")
+        with self.lock:
+            records, pending_publish = self._load()
+            self._require_mutable(pending_publish)
+            target = self._find(records, record_id)
+            if target.deleted_at is not None or not target.desired_active:
+                raise DashboardError("削除待ちまたは削除済みのWebルートは切り替えできません。")
+            updated = replace(target, desired_enabled=enabled, updated_at=utc_now())
+            records = [updated if item.id == record_id else item for item in records]
+            self._save(records, pending_publish)
+            return updated
+
+    def delete(self, record_id: str) -> bool:
+        with self.lock:
+            records, pending_publish = self._load()
+            self._require_mutable(pending_publish)
+            target = self._find(records, record_id)
+            if target.deleted_at is not None:
+                raise DashboardError("削除済み履歴は履歴消去を使用してください。")
+            if target.applied_route is None:
+                self._save(
+                    [item for item in records if item.id != record_id],
+                    pending_publish,
+                )
+                return True
+            pending_delete = replace(
+                target,
+                route=target.applied_route,
+                desired_active=False,
+                desired_enabled=False,
+                updated_at=utc_now(),
+                deleted_at=None,
+            )
+            records = [
+                pending_delete if item.id == record_id else item for item in records
+            ]
+            self._save(records, pending_publish)
+            return False
+
+    def cancel_delete(self, record_id: str) -> WebRouteRecord:
+        with self.lock:
+            records, pending_publish = self._load()
+            self._require_mutable(pending_publish)
+            target = self._find(records, record_id)
+            if target.deleted_at is not None or target.desired_active or target.applied_route is None:
+                raise DashboardError("削除待ちのWebルートではありません。")
+            restored = replace(
+                target,
+                route=target.applied_route,
+                desired_active=True,
+                desired_enabled=target.applied_enabled,
+                updated_at=utc_now(),
+            )
+            records = [restored if item.id == record_id else item for item in records]
+            self._save(records, pending_publish)
+            return restored
+
+    def purge_deleted(self, record_id: str) -> None:
+        with self.lock:
+            records, pending_publish = self._load()
+            self._require_mutable(pending_publish)
+            target = self._find(records, record_id)
+            if target.deleted_at is None:
+                raise DashboardError("削除済みのWebルートだけ履歴から消去できます。")
+            self._save(
+                [item for item in records if item.id != record_id],
+                pending_publish,
+            )
+
+    def preview(self) -> dict[str, Any]:
+        with self.lock:
+            records, pending_publish = self._load()
+            if pending_publish is not None:
+                raise ConflictError(
+                    "Webルートの反映途中です。先に「Webルートを再反映」を実行してください。"
+                )
+            config = render_web_routes_config(records)
+            metadata = {
+                "created_at": utc_now(),
+                "fingerprint": web_routes_fingerprint(records),
+                "config_sha256": hashlib.sha256(config.encode("utf-8")).hexdigest(),
+                "counts": self._change_counts(records),
+                "routes": [
+                    {
+                        "hostname": record.route.hostname,
+                        "target": (
+                            f"http://{record.route.docker_alias}:"
+                            f"{record.route.container_port}"
+                        ),
+                    }
+                    for record in sorted(
+                        records,
+                        key=lambda item: (item.route.hostname, item.route.name),
+                    )
+                    if (
+                        record.desired_active
+                        and record.desired_enabled
+                        and record.deleted_at is None
+                    )
+                ],
+                "config": config,
+            }
+            atomic_write_json(self.preview_path, metadata, mode=0o600)
+            return metadata
+
+    def publish(self) -> dict[str, Any]:
+        with self.lock:
+            records, pending_publish = self._load()
+            recovering = pending_publish is not None
+            if pending_publish is None:
+                self._require_managed_target()
+                preview = self.load_preview()
+                if preview is None:
+                    raise DashboardError("先にWebルートの反映内容を確認してください。")
+                current_fingerprint = web_routes_fingerprint(records)
+                if not hmac.compare_digest(
+                    str(preview.get("fingerprint", "")),
+                    current_fingerprint,
+                ):
+                    raise ConflictError(
+                        "プレビュー作成後にWebルートが変更されています。反映内容を確認し直してください。"
+                    )
+                config = render_web_routes_config(records)
+                if not hmac.compare_digest(
+                    str(preview.get("config_sha256", "")),
+                    hashlib.sha256(config.encode("utf-8")).hexdigest(),
+                ):
+                    raise ConflictError(
+                        "生成内容がプレビューと一致しません。反映内容を確認し直してください。"
+                    )
+                pending_publish = self._pending_snapshot(records, config)
+                self._save(records, pending_publish)
+            else:
+                config = str(pending_publish.get("config", ""))
+                if not config.startswith(WEB_ROUTE_MARKER + "\n"):
+                    raise DashboardError("反映途中のWebルート設定データが破損しています。")
+
+                self._require_managed_target()
+            try:
+                atomic_write_text(self.dynamic_config_path, config, mode=0o644)
+            except OSError as exc:
+                raise DashboardError(
+                    "Traefik設定の書き込みに失敗しました。"
+                    "原因を解消して「Webルートを再反映」を実行してください。"
+                    f" ({exc})"
+                ) from exc
+
+            committed = self._commit_pending(records, pending_publish)
+            self._save(committed, None)
+            try:
+                self.preview_path.unlink()
+            except FileNotFoundError:
+                pass
+            return {
+                "recovered": recovering,
+                "published_at": utc_now(),
+                "active_count": sum(
+                    record.desired_active
+                    and record.desired_enabled
+                    and record.deleted_at is None
+                    for record in committed
+                ),
+            }
+
+    def load_preview(self) -> dict[str, Any] | None:
+        if not self.preview_path.exists():
+            return None
+        try:
+            value = json.loads(self.preview_path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def status(self) -> dict[str, Any]:
+        with self.lock:
+            records, pending_publish = self._load()
+            views = [
+                self._record_view(record, False)
+                for record in records
+            ]
+            config_ok, config_message = self.config_target_status()
+            return {
+                "total": sum(view["state_group"] != "deleted" for view in views),
+                "pending": sum(view["state_group"] == "pending" for view in views),
+                "enabled": sum(view["state_group"] == "enabled" for view in views),
+                "disabled": sum(view["state_group"] == "disabled" for view in views),
+                "deleted": sum(view["state_group"] == "deleted" for view in views),
+                "publish_recovery_required": pending_publish is not None,
+                "config_ready": config_ok,
+                "config_message": config_message,
+            }
+
+    def config_target_status(self) -> tuple[bool, str]:
+        parent = self.dynamic_config_path.parent
+        if not parent.exists():
+            return False, f"動的設定ディレクトリがありません: {parent}"
+        if not os.access(parent, os.W_OK):
+            return False, f"動的設定ディレクトリへ書き込めません: {parent}"
+        try:
+            self._require_managed_target()
+        except DashboardError as exc:
+            return False, str(exc)
+        return True, f"管理対象ファイルへ書き込み可能: {self.dynamic_config_path}"
+
+    def _load(self) -> tuple[list[WebRouteRecord], dict[str, Any] | None]:
+        if not self.path.exists():
+            return [], None
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            if value.get("version") != 1:
+                raise DashboardError("未対応のWebルートデータ形式です。")
+            records = [
+                self._record_from_mapping(item)
+                for item in value.get("records", [])
+            ]
+            pending_publish = value.get("pending_publish")
+            if pending_publish is not None and not isinstance(pending_publish, dict):
+                raise DashboardError("Webルート反映途中データが不正です。")
+            self._validate_records(records)
+            return records, pending_publish
+        except (OSError, json.JSONDecodeError, TypeError, KeyError) as exc:
+            raise DashboardError(f"Webルートデータを読み込めません: {exc}") from exc
+
+    @staticmethod
+    def _record_from_mapping(value: dict[str, Any]) -> WebRouteRecord:
+        applied_value = value.get("applied_route")
+        return WebRouteRecord(
+            id=str(value["id"]),
+            route=WebRoute.from_mapping(value["route"]),
+            applied_route=(
+                WebRoute.from_mapping(applied_value)
+                if isinstance(applied_value, dict)
+                else None
+            ),
+            desired_active=bool(value["desired_active"]),
+            desired_enabled=bool(value["desired_enabled"]),
+            applied_enabled=bool(value["applied_enabled"]),
+            created_at=str(value["created_at"]),
+            updated_at=str(value["updated_at"]),
+            applied_at=str(value["applied_at"]) if value.get("applied_at") else None,
+            deleted_at=str(value["deleted_at"]) if value.get("deleted_at") else None,
+        )
+
+    def _save(
+        self,
+        records: Iterable[WebRouteRecord],
+        pending_publish: dict[str, Any] | None,
+    ) -> None:
+        materialized = list(records)
+        self._validate_records(materialized)
+        atomic_write_json(
+            self.path,
+            {
+                "version": 1,
+                "records": [asdict(record) for record in materialized],
+                "pending_publish": pending_publish,
+            },
+            mode=0o600,
+        )
+
+    @staticmethod
+    def _validate_records(records: list[WebRouteRecord]) -> None:
+        ids = [record.id for record in records]
+        if len(ids) != len(set(ids)):
+            raise DashboardError("WebルートIDが重複しています。")
+        active = [
+            record
+            for record in records
+            if record.desired_active and record.deleted_at is None
+        ]
+        names = [record.route.name for record in active]
+        if len(names) != len(set(names)):
+            raise ConflictError("Webルート名が重複しています。")
+        hostnames = [record.route.hostname for record in active]
+        if len(hostnames) != len(set(hostnames)):
+            raise ConflictError("同じドメインを複数のWebルートへ登録できません。")
+
+    @staticmethod
+    def _find(
+        records: list[WebRouteRecord],
+        record_id: str,
+    ) -> WebRouteRecord:
+        for record in records:
+            if record.id == record_id:
+                return record
+        raise DashboardError(f"Webルートが見つかりません: {record_id}")
+
+    @staticmethod
+    def _require_mutable(pending_publish: dict[str, Any] | None) -> None:
+        if pending_publish is not None:
+            raise ConflictError(
+                "Webルートの反映途中です。先に「Webルートを再反映」を実行してください。"
+            )
+
+    def _require_managed_target(self) -> None:
+        if not self.dynamic_config_path.exists():
+            return
+        try:
+            content = self.dynamic_config_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DashboardError(f"Traefik設定を読み込めません: {exc}") from exc
+        if content and not content.startswith(WEB_ROUTE_MARKER + "\n"):
+            raise ConflictError(
+                "ui-web-routes.ymlは管理画面が作成したファイルではないため上書きできません。"
+            )
+
+    @classmethod
+    def _record_has_pending_change(cls, record: WebRouteRecord) -> bool:
+        if record.deleted_at is not None:
+            return False
+        if not record.desired_active:
+            return record.applied_route is not None
+        return (
+            record.route != record.applied_route
+            or record.desired_enabled != record.applied_enabled
+        )
+
+    @classmethod
+    def _change_counts(cls, records: list[WebRouteRecord]) -> dict[str, int]:
+        counts = {
+            "create": 0,
+            "update": 0,
+            "enable": 0,
+            "disable": 0,
+            "delete": 0,
+        }
+        for record in records:
+            if record.deleted_at is not None:
+                continue
+            if not record.desired_active and record.applied_route is not None:
+                counts["delete"] += 1
+            elif record.applied_route is None:
+                counts["create"] += 1
+            elif record.route != record.applied_route:
+                counts["update"] += 1
+            elif record.desired_enabled and not record.applied_enabled:
+                counts["enable"] += 1
+            elif not record.desired_enabled and record.applied_enabled:
+                counts["disable"] += 1
+        return counts
+
+    @classmethod
+    def _pending_snapshot(
+        cls,
+        records: list[WebRouteRecord],
+        config: str,
+    ) -> dict[str, Any]:
+        return {
+            "created_at": utc_now(),
+            "fingerprint": web_routes_fingerprint(records),
+            "config": config,
+            "active": [
+                {
+                    "id": record.id,
+                    "route": asdict(record.route),
+                    "enabled": record.desired_enabled,
+                }
+                for record in records
+                if record.desired_active and record.deleted_at is None
+            ],
+            "deleted_ids": [
+                record.id
+                for record in records
+                if (
+                    not record.desired_active
+                    and record.deleted_at is None
+                    and record.applied_route is not None
+                )
+            ],
+            "changed_ids": [
+                record.id
+                for record in records
+                if cls._record_has_pending_change(record)
+            ],
+        }
+
+    @staticmethod
+    def _commit_pending(
+        records: list[WebRouteRecord],
+        pending_publish: dict[str, Any],
+    ) -> list[WebRouteRecord]:
+        now = utc_now()
+        active = {
+            str(item["id"]): (
+                WebRoute.from_mapping(item["route"]),
+                bool(item["enabled"]),
+            )
+            for item in pending_publish.get("active", [])
+        }
+        deleted_ids = {
+            str(item) for item in pending_publish.get("deleted_ids", [])
+        }
+        committed: list[WebRouteRecord] = []
+        for record in records:
+            if record.id in active:
+                route, enabled = active[record.id]
+                committed.append(
+                    replace(
+                        record,
+                        route=route,
+                        applied_route=route,
+                        desired_active=True,
+                        desired_enabled=enabled,
+                        applied_enabled=enabled,
+                        updated_at=now,
+                        applied_at=now,
+                    )
+                )
+            elif record.id in deleted_ids:
+                committed.append(
+                    replace(
+                        record,
+                        applied_route=None,
+                        desired_active=False,
+                        desired_enabled=False,
+                        applied_enabled=False,
+                        updated_at=now,
+                        applied_at=now,
+                        deleted_at=now,
+                    )
+                )
+            else:
+                committed.append(record)
+        return committed
+
+    @classmethod
+    def _record_view(
+        cls,
+        record: WebRouteRecord,
+        publish_pending: bool,
+    ) -> dict[str, Any]:
+        if record.deleted_at is not None:
+            state = "deleted"
+            group = "deleted"
+        elif publish_pending:
+            state = "publishing"
+            group = "pending"
+        elif not record.desired_active:
+            state = "pending_delete"
+            group = "pending"
+        elif record.desired_enabled:
+            if not record.applied_enabled:
+                state = (
+                    "pending_create"
+                    if record.applied_route is None
+                    else "pending_enable"
+                )
+                group = "pending"
+            elif record.route != record.applied_route:
+                state = "pending_update"
+                group = "pending"
+            else:
+                state = "enabled"
+                group = "enabled"
+        elif record.applied_enabled:
+            state = "pending_disable"
+            group = "pending"
+        elif record.route != record.applied_route:
+            state = (
+                "pending_create"
+                if record.applied_route is None
+                else "pending_update"
+            )
+            group = "pending"
+        else:
+            state = "disabled"
+            group = "disabled"
+        return {
+            "id": record.id,
+            **asdict(record.route),
+            "desired_enabled": record.desired_enabled,
+            "applied_enabled": record.applied_enabled,
+            "state": state,
+            "state_group": group,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "applied_at": record.applied_at,
+            "deleted_at": record.deleted_at,
+        }
+
+
 class AuditLog:
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "audit.jsonl"
@@ -1887,6 +2687,27 @@ def atomic_write_json(path: Path, payload: Any, mode: int = 0o600) -> None:
         with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def atomic_write_text(path: Path, content: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+            stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(temporary, mode)

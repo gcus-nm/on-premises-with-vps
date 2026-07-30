@@ -11,12 +11,15 @@ from pathlib import Path
 from dashboard.core import (
     CommandResult,
     ConflictError,
+    DashboardError,
     PeerAccessRule,
     RelayManager,
     Route,
     RouteStore,
     TerraformManager,
     ValidationError,
+    WebRoute,
+    WebRouteStore,
     WireGuardPeer,
     analyze_terraform_plan,
     compact_port_ranges,
@@ -44,6 +47,18 @@ def route(**overrides: object) -> Route:
     }
     value.update(overrides)
     return Route.from_mapping(value)
+
+
+def web_route(**overrides: object) -> WebRoute:
+    value: dict[str, object] = {
+        "name": "app",
+        "hostname": "app.oci.example.jp",
+        "docker_alias": "app-service",
+        "container_port": 8080,
+        "description": "Webアプリ",
+    }
+    value.update(overrides)
+    return WebRoute.from_mapping(value)
 
 
 class RouteValidationTests(unittest.TestCase):
@@ -87,7 +102,141 @@ class RouteValidationTests(unittest.TestCase):
         self.assertEqual(
             routes_fingerprint([first, second]),
             routes_fingerprint([second, first]),
+            )
+
+
+class WebRouteTests(unittest.TestCase):
+    def test_normalizes_and_validates_fields(self) -> None:
+        result = WebRoute.from_mapping(
+            {
+                "name": " App ",
+                "hostname": "APP.OCI.Example.JP.",
+                "docker_alias": "App-Service",
+                "container_port": "8080",
+                "description": " app ",
+            }
         )
+        self.assertEqual(result.name, "app")
+        self.assertEqual(result.hostname, "app.oci.example.jp")
+        self.assertEqual(result.docker_alias, "app-service")
+        self.assertEqual(result.container_port, 8080)
+
+    def test_rejects_invalid_hostname_alias_and_port(self) -> None:
+        invalid = (
+            {"hostname": "*.example.jp"},
+            {"hostname": "example"},
+            {"hostname": "https://app.example.jp"},
+            {"hostname": "app.example.jp.."},
+            {"hostname": "127.0.0.1"},
+            {"docker_alias": "bad_alias"},
+            {"docker_alias": "localhost"},
+            {"container_port": 0},
+            {"container_port": 65536},
+        )
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises(ValidationError):
+                web_route(**values)
+
+    def test_store_publish_state_machine_and_deterministic_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "dynamic" / "ui-web-routes.yml"
+            config.parent.mkdir()
+            sibling = config.parent / "minecraft.yml"
+            sibling.write_text("tcp: {}\n", encoding="utf-8")
+            store = WebRouteStore(root / "data", config)
+            second = store.create(
+                web_route(
+                    name="z-app",
+                    hostname="z.example.jp",
+                    docker_alias="z-app",
+                    container_port=9000,
+                )
+            )
+            first = store.create(web_route())
+            store.set_enabled(second.id, False)
+
+            preview = store.preview()
+            self.assertEqual(preview["counts"]["create"], 2)
+            self.assertIn("Host(`app.oci.example.jp`)", preview["config"])
+            self.assertNotIn("z.example.jp", preview["config"])
+            published = store.publish()
+
+            self.assertEqual(published["active_count"], 1)
+            content = config.read_text(encoding="utf-8")
+            self.assertEqual(content, preview["config"])
+            self.assertEqual(sibling.read_text(encoding="utf-8"), "tcp: {}\n")
+            self.assertEqual(
+                [item["state"] for item in store.views()],
+                ["enabled", "disabled"],
+            )
+
+            store.update(first.id, web_route(container_port=8081))
+            store.preview()
+            store.set_enabled(first.id, False)
+            with self.assertRaises(ConflictError):
+                store.publish()
+
+    def test_rejects_duplicate_name_and_hostname(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WebRouteStore(root / "data", root / "dynamic" / "ui-web-routes.yml")
+            store.create(web_route())
+            with self.assertRaises(ConflictError):
+                store.create(web_route(hostname="other.example.jp"))
+            with self.assertRaises(ConflictError):
+                store.create(web_route(name="other"))
+
+    def test_soft_delete_cancel_and_history_purge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WebRouteStore(root / "data", root / "dynamic" / "ui-web-routes.yml")
+            created = store.create(web_route())
+            store.preview()
+            store.publish()
+            self.assertFalse(store.delete(created.id))
+            self.assertEqual(store.views()[0]["state"], "pending_delete")
+            store.cancel_delete(created.id)
+            self.assertEqual(store.views()[0]["state"], "enabled")
+            store.delete(created.id)
+            store.preview()
+            store.publish()
+            self.assertEqual(store.views()[0]["state"], "deleted")
+            store.purge_deleted(created.id)
+            self.assertEqual(store.views(), [])
+
+    def test_failed_write_locks_changes_and_retry_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blocked = root / "not-a-directory"
+            blocked.write_text("blocked", encoding="utf-8")
+            store = WebRouteStore(root / "data", blocked / "ui-web-routes.yml")
+            store.create(web_route())
+            store.preview()
+            with self.assertRaises(DashboardError):
+                store.publish()
+            with self.assertRaises(ConflictError):
+                store.create(web_route(name="other", hostname="other.example.jp"))
+
+            dynamic = root / "dynamic"
+            store.dynamic_config_path = dynamic / "ui-web-routes.yml"
+            result = store.publish()
+            self.assertTrue(result["recovered"])
+            self.assertEqual(store.views()[0]["state"], "enabled")
+
+    def test_refuses_to_overwrite_unmanaged_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "dynamic" / "ui-web-routes.yml"
+            config.parent.mkdir()
+            config.write_text("http: {}\n", encoding="utf-8")
+            store = WebRouteStore(root / "data", config)
+            store.create(web_route())
+            store.preview()
+            with self.assertRaises(ConflictError):
+                store.publish()
+            self.assertEqual(config.read_text(encoding="utf-8"), "http: {}\n")
+            self.assertFalse(store.status()["publish_recovery_required"])
 
 
 class PortExpressionTests(unittest.TestCase):
@@ -128,6 +277,24 @@ class PortExpressionTests(unittest.TestCase):
 
 
 class RouteStoreTests(unittest.TestCase):
+    def test_web_gateway_setup_is_atomic_when_second_port_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RouteStore(Path(directory))
+            store.create(
+                route(
+                    name="other-https",
+                    public_port=443,
+                    target_address="10.99.0.3",
+                    target_port=8443,
+                )
+            )
+            with self.assertRaises(ConflictError):
+                store.setup_web_gateway("10.99.0.2")
+            self.assertEqual(
+                [(item["public_port"], item["target_address"]) for item in store.views()],
+                [(443, "10.99.0.3")],
+            )
+
     def test_unapplied_create_update_and_delete_cancel(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RouteStore(Path(directory))
