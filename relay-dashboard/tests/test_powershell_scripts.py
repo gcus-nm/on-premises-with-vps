@@ -35,6 +35,23 @@ class PowerShellCompatibilityTests(unittest.TestCase):
                     "Use ${name} when Japanese text immediately follows a variable.",
                 )
 
+    def test_dashboard_firewall_limits_web_access_to_requested_peers(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        content = (
+            project_root / "scripts/relay-dashboard-firewall.ps1"
+        ).read_text(encoding="utf-8-sig")
+
+        self.assertIn("[string[]]$DashboardClientAddress = @()", content)
+        self.assertIn("[int]$DashboardPort = 41800", content)
+        self.assertIn("-Protocol TCP `", content)
+        self.assertIn("-LocalAddress $MiniPcAddress `", content)
+        self.assertIn("-LocalPort $DashboardPort `", content)
+        self.assertIn("-RemoteAddress $DashboardClientAddress `", content)
+        self.assertNotIn(
+            '-DisplayName "Relay Dashboard from Mac" `',
+            content,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

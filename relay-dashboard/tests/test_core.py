@@ -11,17 +11,24 @@ from pathlib import Path
 from dashboard.core import (
     CommandResult,
     ConflictError,
+    PeerAccessRule,
     RelayManager,
     Route,
     RouteStore,
     TerraformManager,
     ValidationError,
+    WireGuardPeer,
     analyze_terraform_plan,
     compact_port_ranges,
+    normalize_peer_address,
     oci_config_status,
+    parse_peer_access_rules,
     parse_port_expression,
     parse_relay_routes,
+    parse_wireguard_peers,
+    parse_wireguard_status,
     routes_fingerprint,
+    suggest_peer_address,
     validate_route_set,
 )
 
@@ -500,6 +507,148 @@ class RelayParsingTests(unittest.TestCase):
         self.assertIn("manual-minecraft", conflicts[0])
 
 
+class WireGuardManagementTests(unittest.TestCase):
+    def test_parses_peers_status_and_access_rules(self) -> None:
+        peers = parse_wireguard_peers(
+            "NAME\tADDRESS\tPUBLIC_KEY\n"
+            "windows-minibox\t10.99.0.2/32\twindows-key\n"
+            "mac-admin\t10.99.0.3/32\tmac-key\n"
+        )
+        statuses = parse_wireguard_status(
+            "interface: wg0\n"
+            "peer: mac-key\n"
+            "  endpoint: 203.0.113.10:12345\n"
+            "  latest handshake: 42 seconds ago\n"
+            "  transfer: 1.2 MiB received, 3.4 MiB sent\n"
+        )
+        rules = parse_peer_access_rules(
+            "NAME\tPROTOCOL\tSOURCE\tTARGET\n"
+            "mac-to-dashboard\ttcp\t10.99.0.3\t10.99.0.2:41800\n"
+        )
+
+        self.assertEqual(peers["windows-minibox"].address, "10.99.0.2")
+        self.assertEqual(statuses["mac-key"]["latest_handshake"], "42 seconds ago")
+        self.assertEqual(rules["mac-to-dashboard"].target_port, 41800)
+
+    def test_validates_and_suggests_peer_addresses(self) -> None:
+        peers = [
+            WireGuardPeer("windows", "10.99.0.2", "10.99.0.2/32", "key1"),
+            WireGuardPeer("mac", "10.99.0.3", "10.99.0.3/32", "key2"),
+        ]
+
+        self.assertEqual(
+            normalize_peer_address("10.99.0.4"),
+            "10.99.0.4/32",
+        )
+        self.assertEqual(
+            suggest_peer_address(peers, "10.99.0.0/24", "10.99.0.1"),
+            "10.99.0.4",
+        )
+        for invalid in ("10.99.0.1", "10.99.0.4/24", "192.168.1.2"):
+            with self.subTest(address=invalid), self.assertRaises(ValidationError):
+                normalize_peer_address(invalid)
+
+    def test_validates_peer_access_rule(self) -> None:
+        rule = PeerAccessRule.from_mapping(
+            {
+                "name": "mac-to-dashboard",
+                "protocol": "TCP",
+                "source_address": "10.99.0.3",
+                "target_address": "10.99.0.2",
+                "target_port": "41800",
+            }
+        )
+        self.assertEqual(rule.protocol, "tcp")
+        self.assertEqual(rule.target_port, 41800)
+
+        with self.assertRaises(ValidationError):
+            PeerAccessRule.from_mapping(
+                {
+                    "name": "same-peer",
+                    "protocol": "tcp",
+                    "source_address": "10.99.0.3",
+                    "target_address": "10.99.0.3",
+                    "target_port": 41800,
+                }
+            )
+
+    def test_manager_generates_peer_config_on_stdout_and_access_commands(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(
+            command: list[str],
+            environment: dict[str, str],
+            cwd: Path | None,
+            timeout: int,
+        ) -> CommandResult:
+            commands.append(command[2:])
+            if command[2:] == ["list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tADDRESS\tPUBLIC_KEY\n"
+                    "laptop\t10.99.0.4/32\tlaptop-key\n",
+                    "",
+                )
+            if "--output" in command:
+                return CommandResult(
+                    0,
+                    "[Interface]\nPrivateKey = generated\nAddress = 10.99.0.4/32",
+                    "",
+                )
+            return CommandResult(0, "", "")
+
+        manager = RelayManager(Path("/workspace/scripts/wg-relay.sh"), "oci-relay", runner)
+        name, config = manager.create_peer(
+            "laptop",
+            "10.99.0.4",
+            "10.99.0.0/24",
+            "10.99.0.1",
+        )
+        rotated_name, rotated_config = manager.rotate_peer("laptop")
+        rule = PeerAccessRule(
+            "laptop-to-dashboard",
+            "tcp",
+            "10.99.0.4",
+            "10.99.0.2",
+            41800,
+        )
+        manager.create_peer_access_rule(rule)
+        manager.update_peer_access_rule(rule)
+        manager.delete_peer_access_rule(rule.name)
+
+        self.assertEqual(name, "laptop")
+        self.assertEqual(rotated_name, "laptop")
+        self.assertTrue(config.endswith("\n"))
+        self.assertTrue(rotated_config.startswith("[Interface]"))
+        self.assertIn(
+            [
+                "add",
+                "laptop",
+                "--address",
+                "10.99.0.4/32",
+                "--output",
+                "-",
+            ],
+            commands,
+        )
+        self.assertIn(
+            [
+                "peer-forward",
+                "add",
+                "laptop-to-dashboard",
+                "--protocol",
+                "tcp",
+                "--source-address",
+                "10.99.0.4",
+                "--target-address",
+                "10.99.0.2",
+                "--target-port",
+                "41800",
+            ],
+            commands,
+        )
+
+
 class RelayScriptTests(unittest.TestCase):
     def test_uses_runtime_home_ssh_config(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
@@ -548,6 +697,51 @@ class RelayScriptTests(unittest.TestCase):
                 capture.read_text(encoding="utf-8").splitlines()[:3],
                 ["-F", str(ssh_config), "oci-relay"],
             )
+
+    def test_can_stream_generated_peer_config_without_writing_a_file(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            binary_directory = temporary / "bin"
+            ssh_directory = temporary / ".ssh"
+            binary_directory.mkdir()
+            ssh_directory.mkdir()
+            (ssh_directory / "config").write_text("Host oci-relay\n", encoding="utf-8")
+            fake_ssh = binary_directory / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                "printf '[Interface]\\nPrivateKey = generated\\nAddress = 10.99.0.4/32\\n'\n",
+                encoding="utf-8",
+            )
+            fake_ssh.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOME": str(temporary),
+                    "PATH": f"{binary_directory}:{environment['PATH']}",
+                }
+            )
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(project_root / "scripts/wg-relay.sh"),
+                    "add",
+                    "laptop",
+                    "--address",
+                    "10.99.0.4/32",
+                    "--output",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(result.stdout.startswith("[Interface]"))
+            self.assertFalse((project_root / "generated/wireguard/laptop.conf").exists())
 
 
 class OciConfigTests(unittest.TestCase):

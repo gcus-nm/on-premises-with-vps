@@ -29,8 +29,8 @@ usage() {
 Usage:
   ./scripts/wg-relay.sh install
   ./scripts/wg-relay.sh init [--server-address CIDR] [--listen-port PORT] [--endpoint HOST:PORT]
-  ./scripts/wg-relay.sh add NAME --address IPV4/32 [--output FILE]
-  ./scripts/wg-relay.sh update NAME --address IPV4/32 [--output FILE]
+  ./scripts/wg-relay.sh add NAME --address IPV4/32 [--output FILE|-]
+  ./scripts/wg-relay.sh update NAME --address IPV4/32 [--output FILE|-]
   ./scripts/wg-relay.sh delete NAME [--yes]
   ./scripts/wg-relay.sh list
   ./scripts/wg-relay.sh status
@@ -171,6 +171,13 @@ generate_client_config() {
   [ -n "${address}" ] || die "${operation} requires --address IPV4/32"
   if [ -z "${output}" ]; then
     output="${GENERATED_DIR}/${name}.conf"
+  fi
+  if [ "${output}" = "-" ]; then
+    if remote_command "${operation}" "${name}" --address "${address}"; then
+      log "generated client configuration on standard output"
+      return
+    fi
+    die "failed to ${operation} peer ${name}"
   fi
 
   output_directory="$(dirname -- "${output}")"

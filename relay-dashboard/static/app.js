@@ -10,6 +10,14 @@ const appState = {
   pendingRelay: false,
   busy: false,
   collapsedGroups: new Set(),
+  peers: [],
+  accessRules: [],
+  suggestedPeerAddress: "",
+  relayNetwork: "10.99.0.0/24",
+  dashboardTargetAddress: "10.99.0.2",
+  dashboardPort: 41800,
+  wireguardLoading: true,
+  wireguardError: "",
 };
 
 const routeStateLabels = {
@@ -75,6 +83,27 @@ const elements = {
   infoEyebrow: document.querySelector("#info-eyebrow"),
   infoTitle: document.querySelector("#info-title"),
   infoContent: document.querySelector("#info-content"),
+  wireguardPeerSummary: document.querySelector("#wireguard-peer-summary"),
+  wireguardPeerList: document.querySelector("#wireguard-peer-list"),
+  wireguardAccessList: document.querySelector("#wireguard-access-list"),
+  wireguardError: document.querySelector("#wireguard-error"),
+  peerDialog: document.querySelector("#peer-dialog"),
+  peerForm: document.querySelector("#peer-form"),
+  peerName: document.querySelector("#peer-name"),
+  peerAddress: document.querySelector("#peer-address"),
+  peerFormError: document.querySelector("#peer-form-error"),
+  savePeerButton: document.querySelector("#save-peer-button"),
+  accessRuleDialog: document.querySelector("#access-rule-dialog"),
+  accessRuleForm: document.querySelector("#access-rule-form"),
+  accessRuleDialogTitle: document.querySelector("#access-rule-dialog-title"),
+  accessRuleOriginalName: document.querySelector("#access-rule-original-name"),
+  accessRuleName: document.querySelector("#access-rule-name"),
+  accessSource: document.querySelector("#access-source"),
+  accessTarget: document.querySelector("#access-target"),
+  accessProtocol: document.querySelector("#access-protocol"),
+  accessTargetPort: document.querySelector("#access-target-port"),
+  accessRuleFormError: document.querySelector("#access-rule-form-error"),
+  saveAccessRuleButton: document.querySelector("#save-access-rule-button"),
   toast: document.querySelector("#toast"),
 };
 
@@ -111,6 +140,28 @@ async function loadState() {
   render();
 }
 
+async function loadWireGuard() {
+  appState.wireguardLoading = true;
+  appState.wireguardError = "";
+  renderWireGuard();
+  try {
+    const payload = await api("/api/wireguard");
+    appState.peers = payload.peers || [];
+    appState.accessRules = payload.access_rules || [];
+    appState.suggestedPeerAddress = payload.suggested_address || "";
+    appState.relayNetwork = payload.relay_network || appState.relayNetwork;
+    appState.dashboardTargetAddress =
+      payload.dashboard_target_address || appState.dashboardTargetAddress;
+    appState.dashboardPort = Number(payload.dashboard_port || appState.dashboardPort);
+  } catch (error) {
+    appState.wireguardError = firstLine(error.message);
+    throw error;
+  } finally {
+    appState.wireguardLoading = false;
+    renderWireGuard();
+  }
+}
+
 function render() {
   const managed = appState.routes.filter((route) => route.state !== "deleted");
   const enabled = managed.filter((route) => route.desired_enabled);
@@ -125,6 +176,103 @@ function render() {
   renderAudit();
   renderPlanStatus();
   renderOperationAvailability();
+  renderWireGuard();
+}
+
+function renderWireGuard() {
+  const locked = appState.busy || appState.wireguardLoading;
+  document.querySelector("#new-peer-button").disabled = locked;
+  document.querySelector("#new-access-rule-button").disabled =
+    locked || appState.peers.length < 2;
+  document.querySelector("#wireguard-refresh-button").disabled =
+    appState.wireguardLoading;
+  elements.wireguardError.textContent = appState.wireguardError;
+  elements.wireguardPeerSummary.textContent = appState.wireguardLoading
+    ? "OCIからPeer状態を読み込んでいます。"
+    : `${appState.peers.length} Peer · ${appState.relayNetwork} · ACL ${appState.accessRules.length}件`;
+
+  if (appState.wireguardLoading && !appState.peers.length) {
+    elements.wireguardPeerList.innerHTML = '<p class="muted">読み込み中です。</p>';
+    elements.wireguardAccessList.innerHTML = '<p class="muted">読み込み中です。</p>';
+    return;
+  }
+
+  elements.wireguardPeerList.innerHTML = appState.peers.length
+    ? appState.peers.map((peer) => renderPeerItem(peer, locked)).join("")
+    : '<p class="muted">登録済みPeerはありません。</p>';
+  elements.wireguardAccessList.innerHTML = appState.accessRules.length
+    ? appState.accessRules.map((rule) => renderAccessRuleItem(rule, locked)).join("")
+    : '<p class="muted">Peer間アクセスルールはありません。</p>';
+}
+
+function renderPeerItem(peer, locked) {
+  const connected = peer.latest_handshake && peer.latest_handshake !== "未接続";
+  const references = peer.access_rules || [];
+  const canAddAccess =
+    appState.peers.length > 1 && peer.address !== appState.dashboardTargetAddress;
+  return `
+    <article class="wireguard-item">
+      <div class="wireguard-item-heading">
+        <div>
+          <strong>${escapeHtml(peer.name)}</strong>
+          <small class="mono">${escapeHtml(peer.cidr)}</small>
+        </div>
+        <small>
+          <span class="status-dot ${connected ? "connected" : ""}"></span>
+          ${escapeHtml(peer.latest_handshake || "未接続")}
+        </small>
+      </div>
+      <div class="wireguard-peer-meta">
+        <div>
+          <span>Endpoint</span>
+          <strong title="${escapeAttribute(peer.endpoint || "未接続")}">${escapeHtml(peer.endpoint || "未接続")}</strong>
+        </div>
+        <div>
+          <span>Transfer</span>
+          <strong title="${escapeAttribute(peer.transfer || "データなし")}">${escapeHtml(peer.transfer || "データなし")}</strong>
+        </div>
+      </div>
+      <p class="wireguard-reference">
+        ${references.length ? `参照ルール: ${escapeHtml(references.join(", "))}` : "参照中のアクセスルールなし"}
+      </p>
+      <div class="wireguard-item-actions">
+        ${
+          canAddAccess
+            ? `<button class="small-button" type="button" data-peer-access="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>アクセス追加</button>`
+            : ""
+        }
+        <button class="small-button edit" type="button" data-peer-rotate="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>鍵を更新</button>
+        <button class="small-button danger" type="button" data-peer-delete="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>削除</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderAccessRuleItem(rule, locked) {
+  const source = peerLabel(rule.source_address);
+  const target = peerLabel(rule.target_address);
+  return `
+    <article class="wireguard-item">
+      <div class="wireguard-item-heading">
+        <strong>${escapeHtml(rule.name)}</strong>
+        <span class="protocol-badge ${escapeAttribute(rule.protocol)}">${rule.protocol.toUpperCase()}</span>
+      </div>
+      <div class="wireguard-flow">
+        <span>${escapeHtml(source)}</span>
+        <span class="wireguard-flow-arrow">→</span>
+        <span>${escapeHtml(target)}:${rule.target_port}</span>
+      </div>
+      <div class="wireguard-item-actions">
+        <button class="small-button edit" type="button" data-access-edit="${escapeAttribute(rule.name)}" ${locked ? "disabled" : ""}>編集</button>
+        <button class="small-button danger" type="button" data-access-delete="${escapeAttribute(rule.name)}" ${locked ? "disabled" : ""}>削除</button>
+      </div>
+    </article>
+  `;
+}
+
+function peerLabel(address) {
+  const peer = appState.peers.find((item) => item.address === address);
+  return peer ? `${peer.name} (${address})` : address;
 }
 
 function renderRoutes() {
@@ -939,6 +1087,228 @@ async function syncRelay() {
   }
 }
 
+function openNewPeer() {
+  if (appState.busy || appState.wireguardLoading) return;
+  elements.peerForm.reset();
+  elements.peerAddress.value = appState.suggestedPeerAddress;
+  elements.peerFormError.textContent = "";
+  elements.peerDialog.showModal();
+  elements.peerName.focus();
+}
+
+async function savePeer() {
+  elements.peerFormError.textContent = "";
+  if (!elements.peerForm.reportValidity()) return;
+  setButtonBusy(elements.savePeerButton, true, "追加中…");
+  try {
+    const payload = await api("/api/wireguard/peers", {
+      method: "POST",
+      body: {
+        name: elements.peerName.value,
+        address: elements.peerAddress.value,
+      },
+    });
+    downloadClientConfig(payload);
+    elements.peerDialog.close();
+    await refreshAfterWireGuardMutation();
+    toast(payload.message || "Peerを追加しました。");
+  } catch (error) {
+    elements.peerFormError.textContent = firstLine(error.message);
+  } finally {
+    setButtonBusy(elements.savePeerButton, false, "追加して設定を保存");
+  }
+}
+
+function downloadClientConfig(payload) {
+  const content = String(payload.client_config || "");
+  if (!content) throw new Error("クライアント接続設定を取得できませんでした。");
+  const blob = new Blob([content], { type: "application/x-wireguard-profile" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = String(payload.filename || "wireguard.conf");
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  payload.client_config = "";
+}
+
+async function rotatePeer(name) {
+  const confirmation = window.prompt(
+    `${name}の秘密鍵を失効させ、新しい接続設定を発行します。\n既存設定は直ちに接続できなくなります。\n続行する場合は ROTATE と入力してください。`,
+  );
+  if (confirmation !== "ROTATE") return;
+  try {
+    const payload = await api(
+      `/api/wireguard/peers/${encodeURIComponent(name)}/rotate`,
+      {
+        method: "POST",
+        body: { confirmation },
+      },
+    );
+    downloadClientConfig(payload);
+    await refreshAfterWireGuardMutation();
+    toast(payload.message || "鍵を更新しました。");
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  }
+}
+
+async function deletePeer(name) {
+  const peer = appState.peers.find((item) => item.name === name);
+  if (!peer) return;
+  if ((peer.access_rules || []).length) {
+    showInfo(
+      "PEER DELETE BLOCKED",
+      "先にアクセスルールを削除してください",
+      `<p class="muted">参照中: ${escapeHtml(peer.access_rules.join(", "))}</p>`,
+    );
+    return;
+  }
+  const confirmation = window.prompt(
+    `${name}を削除すると、このPeerの接続設定は使用できなくなります。\n続行する場合はPeer名を入力してください。`,
+  );
+  if (confirmation !== name) return;
+  try {
+    const payload = await api(`/api/wireguard/peers/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      body: { confirmation },
+    });
+    await refreshAfterWireGuardMutation();
+    toast(payload.message || "Peerを削除しました。");
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  }
+}
+
+function refreshAccessPeerOptions(sourceAddress = "", targetAddress = "") {
+  const options = appState.peers
+    .map(
+      (peer) =>
+        `<option value="${escapeAttribute(peer.address)}">${escapeHtml(peer.name)} (${escapeHtml(peer.address)})</option>`,
+    )
+    .join("");
+  elements.accessSource.innerHTML = options;
+  elements.accessTarget.innerHTML = options;
+  if (sourceAddress) elements.accessSource.value = sourceAddress;
+  if (targetAddress) elements.accessTarget.value = targetAddress;
+}
+
+function suggestedAccessRuleName(sourcePeer, targetAddress) {
+  const targetPeer = appState.peers.find((peer) => peer.address === targetAddress);
+  const suffix =
+    targetAddress === appState.dashboardTargetAddress
+      ? "dashboard"
+      : targetPeer?.name || "peer";
+  return `${sourcePeer.name}-to-${suffix}`.slice(0, 32).replace(/-+$/, "");
+}
+
+function openNewAccessRule(sourceAddress = "") {
+  if (appState.busy || appState.wireguardLoading || appState.peers.length < 2) return;
+  elements.accessRuleForm.reset();
+  elements.accessRuleOriginalName.value = "";
+  elements.accessRuleName.readOnly = false;
+  elements.accessRuleDialogTitle.textContent = "Peer間アクセスを追加";
+  const sourcePeer =
+    appState.peers.find((peer) => peer.address === sourceAddress) ||
+    appState.peers.find((peer) => peer.address !== appState.dashboardTargetAddress) ||
+    appState.peers[0];
+  const preferredTarget =
+    appState.peers.find(
+      (peer) =>
+        peer.address === appState.dashboardTargetAddress &&
+        peer.address !== sourcePeer.address,
+    ) ||
+    appState.peers.find((peer) => peer.address !== sourcePeer.address);
+  refreshAccessPeerOptions(sourcePeer.address, preferredTarget.address);
+  elements.accessRuleName.value = suggestedAccessRuleName(
+    sourcePeer,
+    preferredTarget.address,
+  );
+  elements.accessProtocol.value = "tcp";
+  elements.accessTargetPort.value =
+    preferredTarget.address === appState.dashboardTargetAddress
+      ? String(appState.dashboardPort)
+      : "";
+  elements.accessRuleFormError.textContent = "";
+  elements.accessRuleDialog.showModal();
+  elements.accessRuleName.focus();
+}
+
+function openEditAccessRule(name) {
+  const rule = appState.accessRules.find((item) => item.name === name);
+  if (!rule || appState.busy || appState.wireguardLoading) return;
+  elements.accessRuleForm.reset();
+  elements.accessRuleOriginalName.value = rule.name;
+  elements.accessRuleName.value = rule.name;
+  elements.accessRuleName.readOnly = true;
+  elements.accessRuleDialogTitle.textContent = "Peer間アクセスを編集";
+  refreshAccessPeerOptions(rule.source_address, rule.target_address);
+  elements.accessProtocol.value = rule.protocol;
+  elements.accessTargetPort.value = String(rule.target_port);
+  elements.accessRuleFormError.textContent = "";
+  elements.accessRuleDialog.showModal();
+}
+
+async function saveAccessRule() {
+  elements.accessRuleFormError.textContent = "";
+  if (!elements.accessRuleForm.reportValidity()) return;
+  const originalName = elements.accessRuleOriginalName.value;
+  const body = {
+    name: elements.accessRuleName.value,
+    protocol: elements.accessProtocol.value,
+    source_address: elements.accessSource.value,
+    target_address: elements.accessTarget.value,
+    target_port: elements.accessTargetPort.value,
+  };
+  setButtonBusy(elements.saveAccessRuleButton, true, "反映中…");
+  try {
+    const payload = await api(
+      originalName
+        ? `/api/wireguard/access-rules/${encodeURIComponent(originalName)}`
+        : "/api/wireguard/access-rules",
+      {
+        method: originalName ? "PUT" : "POST",
+        body,
+      },
+    );
+    elements.accessRuleDialog.close();
+    await refreshAfterWireGuardMutation();
+    toast(payload.message || "Peer間アクセスを反映しました。");
+  } catch (error) {
+    elements.accessRuleFormError.textContent = firstLine(error.message);
+  } finally {
+    setButtonBusy(elements.saveAccessRuleButton, false, "OCIへ反映");
+  }
+}
+
+async function deleteAccessRule(name) {
+  const confirmation = window.prompt(
+    `${name}をOCIから削除します。\n続行する場合は DELETE と入力してください。`,
+  );
+  if (confirmation !== "DELETE") return;
+  try {
+    const payload = await api(
+      `/api/wireguard/access-rules/${encodeURIComponent(name)}`,
+      {
+        method: "DELETE",
+        body: { confirmation },
+      },
+    );
+    await refreshAfterWireGuardMutation();
+    toast(payload.message || "Peer間アクセスを削除しました。");
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  }
+}
+
+async function refreshAfterWireGuardMutation() {
+  await loadWireGuard();
+  await loadState();
+}
+
 function showInfo(eyebrow, title, html) {
   elements.infoEyebrow.textContent = eyebrow;
   elements.infoTitle.textContent = title;
@@ -992,6 +1362,15 @@ document.querySelector("#apply-button").addEventListener("click", applyPlan);
 document.querySelector("#preflight-button").addEventListener("click", showPreflight);
 document.querySelector("#relay-status-button").addEventListener("click", showRelayStatus);
 document.querySelector("#sync-button").addEventListener("click", syncRelay);
+document.querySelector("#new-peer-button").addEventListener("click", openNewPeer);
+document.querySelector("#new-access-rule-button").addEventListener("click", () => {
+  openNewAccessRule();
+});
+document.querySelector("#wireguard-refresh-button").addEventListener("click", () => {
+  loadWireGuard().catch((error) => toast(firstLine(error.message), true));
+});
+elements.savePeerButton.addEventListener("click", savePeer);
+elements.saveAccessRuleButton.addEventListener("click", saveAccessRule);
 document.querySelector("#close-plan-button").addEventListener("click", () => elements.planDialog.close());
 document.querySelector("#close-info-button").addEventListener("click", () => elements.infoDialog.close());
 
@@ -1031,12 +1410,33 @@ elements.groupMemberRows.addEventListener("click", (event) => {
 elements.groupMemberRows.addEventListener("input", updateGroupPreview);
 elements.groupMemberRows.addEventListener("change", updateGroupPreview);
 
+elements.wireguardPeerList.addEventListener("click", (event) => {
+  const access = event.target.closest("[data-peer-access]");
+  const rotate = event.target.closest("[data-peer-rotate]");
+  const remove = event.target.closest("[data-peer-delete]");
+  if (access) {
+    const peer = appState.peers.find((item) => item.name === access.dataset.peerAccess);
+    if (peer) openNewAccessRule(peer.address);
+  }
+  if (rotate) rotatePeer(rotate.dataset.peerRotate);
+  if (remove) deletePeer(remove.dataset.peerDelete);
+});
+
+elements.wireguardAccessList.addEventListener("click", (event) => {
+  const edit = event.target.closest("[data-access-edit]");
+  const remove = event.target.closest("[data-access-delete]");
+  if (edit) openEditAccessRule(edit.dataset.accessEdit);
+  if (remove) deleteAccessRule(remove.dataset.accessDelete);
+});
+
 elements.applyConfirmation.addEventListener("input", () => {
   elements.applyButton.disabled =
     elements.applyButton.dataset.safe !== "true" ||
     elements.applyConfirmation.value !== "APPLY";
 });
 
-loadState().catch((error) => {
-  toast(firstLine(error.message), true);
-});
+loadState()
+  .then(() => loadWireGuard())
+  .catch((error) => {
+    toast(firstLine(error.message), true);
+  });

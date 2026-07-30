@@ -7,6 +7,10 @@ WireGuardの設定ファイルを直接編集せずに運用できるよう、�
 - `scripts/wg-relay.sh`: Macから実行する管理コマンド
 - `scripts/wg-relay-remote.sh`: OCI上でPeerと`wg0.conf`を管理するコマンド
 
+初期構築後は[OCI Relay Control](relay-dashboard/README.md)の「WireGuard管理」から、
+Peerの追加・鍵更新・削除とPeer間アクセスルールも操作できます。最初に管理画面へ接続する
+ためのACLだけは、このスクリプトから設定します。
+
 Windows用秘密鍵は追加・更新コマンドの実行中に生成され、SSHの標準出力からMac上の設定ファイルへ直接保存されます。Terraform state、Git、OCIのディスクには保存しません。
 
 ## 管理対象

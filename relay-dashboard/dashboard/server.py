@@ -19,10 +19,12 @@ from dashboard.core import (
     CommandError,
     ConflictError,
     DashboardError,
+    PeerAccessRule,
     RelayManager,
     Route,
     RouteStore,
     TerraformManager,
+    ValidationError,
     preflight_checks,
 )
 
@@ -50,6 +52,15 @@ class AppContext:
         self.static_dir = Path(os.environ.get("DASHBOARD_STATIC_DIR", "/app/static"))
         self.relay_network = os.environ.get("RELAY_NETWORK", "10.99.0.0/24")
         self.relay_address = os.environ.get("RELAY_ADDRESS", "10.99.0.1")
+        self.dashboard_target_address = os.environ.get(
+            "DASHBOARD_WIREGUARD_TARGET",
+            "10.99.0.2",
+        )
+        self.dashboard_external_port = int(
+            os.environ.get("DASHBOARD_EXTERNAL_PORT", "41800")
+        )
+        if not 1 <= self.dashboard_external_port <= 65535:
+            raise RuntimeError("DASHBOARD_EXTERNAL_PORT must be between 1 and 65535")
         relay_script = Path(
             os.environ.get("RELAY_SCRIPT", "/workspace/scripts/wg-relay.sh")
         )
@@ -141,6 +152,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except DashboardError as exc:
                 self.send_error_json(HTTPStatus.BAD_GATEWAY, str(exc), command_output(exc))
             return
+        if path == "/api/wireguard":
+            if not self.acquire_operation():
+                return
+            try:
+                self.send_wireguard_state()
+            except DashboardError as exc:
+                self.send_error_json(
+                    HTTPStatus.BAD_GATEWAY,
+                    str(exc),
+                    command_output(exc),
+                )
+            finally:
+                self.app.operation_lock.release()
+            return
         if path == "/" or path.startswith("/static/"):
             self.serve_static(path)
             return
@@ -152,6 +177,76 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self.read_json()
+            if path == "/api/wireguard/peers":
+                if not self.acquire_operation():
+                    return
+                try:
+                    name, client_config = self.app.relay.create_peer(
+                        payload.get("name"),
+                        payload.get("address"),
+                        self.app.relay_network,
+                        self.app.relay_address,
+                    )
+                    self.app.audit.append("wireguard-peer-create", "success", name)
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "message": f"WireGuard Peer「{name}」を追加しました。",
+                            "filename": f"{name}.conf",
+                            "client_config": client_config,
+                        },
+                        HTTPStatus.CREATED,
+                    )
+                finally:
+                    self.app.operation_lock.release()
+                return
+            peer_prefix = "/api/wireguard/peers/"
+            rotate_suffix = "/rotate"
+            if path.startswith(peer_prefix) and path.endswith(rotate_suffix):
+                if payload.get("confirmation") != "ROTATE":
+                    raise ValidationError("鍵を更新するにはROTATEと入力してください。")
+                if not self.acquire_operation():
+                    return
+                try:
+                    name = unquote(path[len(peer_prefix) : -len(rotate_suffix)])
+                    name, client_config = self.app.relay.rotate_peer(name)
+                    self.app.audit.append("wireguard-peer-rotate", "success", name)
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "message": f"WireGuard Peer「{name}」の鍵を更新しました。",
+                            "filename": f"{name}.conf",
+                            "client_config": client_config,
+                        }
+                    )
+                finally:
+                    self.app.operation_lock.release()
+                return
+            if path == "/api/wireguard/access-rules":
+                if not self.acquire_operation():
+                    return
+                try:
+                    rule = PeerAccessRule.from_mapping(
+                        payload,
+                        self.app.relay_network,
+                        self.app.relay_address,
+                    )
+                    self.app.relay.create_peer_access_rule(rule)
+                    self.app.audit.append(
+                        "wireguard-access-create",
+                        "success",
+                        rule.name,
+                    )
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "message": f"Peer間アクセス「{rule.name}」を追加しました。",
+                        },
+                        HTTPStatus.CREATED,
+                    )
+                finally:
+                    self.app.operation_lock.release()
+                return
             if path == "/api/routes":
                 if not self.acquire_operation():
                     return
@@ -237,8 +332,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.send_error_json(HTTPStatus.NOT_FOUND, "APIが見つかりません。")
         except (DashboardError, ValueError) as exc:
-            status = HTTPStatus.CONFLICT if isinstance(exc, ConflictError) else HTTPStatus.BAD_REQUEST
-            self.send_error_json(status, str(exc), command_output(exc))
+            self.send_error_json(error_status(exc), str(exc), command_output(exc))
 
     def do_PUT(self) -> None:
         if not self.authenticate() or not self.validate_csrf():
@@ -248,6 +342,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self.read_json()
+            access_prefix = "/api/wireguard/access-rules/"
+            if path.startswith(access_prefix):
+                name = unquote(path[len(access_prefix) :])
+                rule = PeerAccessRule.from_mapping(
+                    {**payload, "name": name},
+                    self.app.relay_network,
+                    self.app.relay_address,
+                    existing_name=True,
+                )
+                self.app.relay.update_peer_access_rule(rule)
+                self.app.audit.append(
+                    "wireguard-access-update",
+                    "success",
+                    rule.name,
+                )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": f"Peer間アクセス「{rule.name}」を更新しました。",
+                    }
+                )
+                return
             route_prefix = "/api/routes/"
             enabled_suffix = "/enabled"
             if path.startswith(route_prefix) and path.endswith(enabled_suffix):
@@ -314,8 +430,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.send_error_json(HTTPStatus.NOT_FOUND, "APIが見つかりません。")
         except (DashboardError, ValueError) as exc:
-            status = HTTPStatus.CONFLICT if isinstance(exc, ConflictError) else HTTPStatus.BAD_REQUEST
-            self.send_error_json(status, str(exc), command_output(exc))
+            self.send_error_json(error_status(exc), str(exc), command_output(exc))
         finally:
             self.app.operation_lock.release()
 
@@ -326,6 +441,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self.acquire_operation():
             return
         try:
+            payload = self.read_json()
+            peer_prefix = "/api/wireguard/peers/"
+            access_prefix = "/api/wireguard/access-rules/"
+            if path.startswith(peer_prefix):
+                name = unquote(path[len(peer_prefix) :])
+                if payload.get("confirmation") != name:
+                    raise ValidationError(
+                        "Peerを削除するには確認欄へPeer名を入力してください。"
+                    )
+                deleted_name = self.app.relay.delete_peer(name)
+                self.app.audit.append(
+                    "wireguard-peer-delete",
+                    "success",
+                    deleted_name,
+                )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": f"WireGuard Peer「{deleted_name}」を削除しました。",
+                    }
+                )
+                return
+            if path.startswith(access_prefix):
+                if payload.get("confirmation") != "DELETE":
+                    raise ValidationError(
+                        "アクセスルールを削除するにはDELETEと入力してください。"
+                    )
+                name = unquote(path[len(access_prefix) :])
+                deleted_name = self.app.relay.delete_peer_access_rule(name)
+                self.app.audit.append(
+                    "wireguard-access-delete",
+                    "success",
+                    deleted_name,
+                )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": f"Peer間アクセス「{deleted_name}」を削除しました。",
+                    }
+                )
+                return
             route_prefix = "/api/routes/"
             history_prefix = "/api/deleted-routes/"
             group_prefix = "/api/groups/"
@@ -382,7 +538,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self.send_error_json(HTTPStatus.NOT_FOUND, "APIが見つかりません。")
         except DashboardError as exc:
-            self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc), command_output(exc))
+            self.send_error_json(error_status(exc), str(exc), command_output(exc))
         finally:
             self.app.operation_lock.release()
 
@@ -499,6 +655,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "groups": self.app.store.group_views(),
             },
             status,
+        )
+
+    def send_wireguard_state(self) -> None:
+        self.send_json(
+            self.app.relay.wireguard_state(
+                self.app.relay_network,
+                self.app.relay_address,
+                self.app.dashboard_target_address,
+                self.app.dashboard_external_port,
+            )
         )
 
     def acquire_operation(self) -> bool:
@@ -638,6 +804,14 @@ def require_environment(name: str) -> str:
 
 def command_output(error: BaseException) -> str:
     return error.output if isinstance(error, CommandError) else ""
+
+
+def error_status(error: BaseException) -> HTTPStatus:
+    if isinstance(error, CommandError):
+        return HTTPStatus.BAD_GATEWAY
+    if isinstance(error, ConflictError):
+        return HTTPStatus.CONFLICT
+    return HTTPStatus.BAD_REQUEST
 
 
 def main() -> None:
