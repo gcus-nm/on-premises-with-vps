@@ -103,7 +103,7 @@ try {
         $ErrorActionPreference = $PreviousErrorActionPreference
     }
     if ($SshKeyscanExitCode -ne 0 -or -not $ScannedKeys) {
-        throw "OCIのSSHホスト鍵を取得できません。WindowsのWireGuardを有効にしてping $RelayAddressを確認してください。"
+        throw "OCIのSSHホスト鍵を取得できません。WindowsのWireGuardを有効にしてping ${RelayAddress}を確認してください。"
     }
     Write-Utf8NoBom -Path $KnownHostsTemporary -Content (($ScannedKeys -join "`n") + "`n")
     $FingerprintOutput = & ssh-keygen -lf $KnownHostsTemporary -E sha256
