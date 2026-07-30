@@ -91,8 +91,18 @@ Write-Utf8NoBom -Path (Join-Path $SshDestination "config") -Content $SshConfig
 $KnownHostsTemporary = Join-Path ([System.IO.Path]::GetTempPath()) `
     "relay-dashboard-known-hosts-$([guid]::NewGuid().ToString('N'))"
 try {
-    $ScannedKeys = & ssh-keyscan -T 8 -t ed25519 $RelayAddress 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $ScannedKeys) {
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 converts ssh-keyscan's normal stderr banner
+        # into a NativeCommandError when ErrorActionPreference is Stop.
+        $ErrorActionPreference = "Continue"
+        $ScannedKeys = & ssh-keyscan -T 8 -t ed25519 $RelayAddress 2>$null
+        $SshKeyscanExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($SshKeyscanExitCode -ne 0 -or -not $ScannedKeys) {
         throw "OCIのSSHホスト鍵を取得できません。WindowsのWireGuardを有効にしてping $RelayAddressを確認してください。"
     }
     Write-Utf8NoBom -Path $KnownHostsTemporary -Content (($ScannedKeys -join "`n") + "`n")
