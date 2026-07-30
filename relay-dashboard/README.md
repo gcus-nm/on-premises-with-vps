@@ -81,6 +81,21 @@ MiniPCのPowerShellでリポジトリルートへ移動し、セットアップ�
   -SshPrivateKeyPath "C:\secure\ssh\oci-relay"
 ```
 
+OCI設定には`DEFAULT`プロファイルと次の5項目が必要です。値はOCIコンソールと、
+登録済みAPI秘密鍵の配置先に合わせます。
+
+```ini
+[DEFAULT]
+tenancy=ocid1.tenancy.oc1..（テナンシーOCID）
+user=ocid1.user.oc1..（ユーザーOCID）
+fingerprint=（APIキーのフィンガープリント）
+region=ap-tokyo-1
+key_file=C:\Users\ユーザー名\.oci\relay-dashboard-api-key.pem
+```
+
+セットアップスクリプトは値を画面へ表示せず、`DEFAULT`に必須項目が揃っているか
+検査します。空の設定ファイルや別プロファイルだけの設定は受け付けません。
+
 スクリプトは次を実行します。
 
 1. OCI設定と秘密鍵を`relay-dashboard/secrets/oci`へコピー

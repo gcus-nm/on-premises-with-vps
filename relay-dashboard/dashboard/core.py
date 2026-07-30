@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import hashlib
 import hmac
 import ipaddress
@@ -671,6 +672,21 @@ def truncate_text(value: str, limit: int) -> str:
     return value[:limit] + "\n\n…出力が長いため省略しました。"
 
 
+def oci_config_status(path: Path) -> tuple[bool, str]:
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with path.open(encoding="utf-8-sig") as stream:
+            parser.read_file(stream)
+    except (OSError, configparser.Error) as exc:
+        return False, f"読込エラー: {exc}"
+
+    required = {"tenancy", "user", "fingerprint", "region", "key_file"}
+    missing = sorted(required - set(parser.defaults()))
+    if missing:
+        return False, "DEFAULTに必須項目がありません: " + ", ".join(missing)
+    return True, "DEFAULTを読込可能"
+
+
 def preflight_checks(
     workspace: Path,
     data_dir: Path,
@@ -697,11 +713,12 @@ def preflight_checks(
         "読込可能" if (workspace / "terraform.tfvars").is_file() else "MiniPC側に配置してください",
     )
     home = Path.home()
-    add(
-        "OCI設定",
-        (home / ".oci/config").is_file(),
-        "読込可能" if (home / ".oci/config").is_file() else "secrets/oci/configを配置してください",
-    )
+    oci_config = home / ".oci/config"
+    if oci_config.is_file():
+        oci_config_ok, oci_config_detail = oci_config_status(oci_config)
+        add("OCI設定", oci_config_ok, oci_config_detail)
+    else:
+        add("OCI設定", False, "secrets/oci/configを配置してください")
     add(
         "SSH設定",
         (home / ".ssh/config").is_file(),
