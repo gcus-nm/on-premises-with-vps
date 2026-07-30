@@ -11,6 +11,13 @@ locals {
     local.is_ampere_a1 ? "24.04 Minimal aarch64" : "24.04 Minimal"
   )
   base_image_id = var.image_ocid != null ? var.image_ocid : try(data.oci_core_images.ubuntu[0].images[0].id, null)
+  # Keep instance metadata stable when the repository is checked out with
+  # LF on macOS/Linux or CRLF on Windows.
+  cloud_init_content = replace(
+    replace(file("${path.module}/cloud-init.yaml"), "\r\n", "\n"),
+    "\r",
+    "\n"
+  )
 }
 
 data "oci_core_images" "ubuntu" {
@@ -77,7 +84,7 @@ resource "oci_core_instance" "relay_image" {
 
   metadata = {
     ssh_authorized_keys = trimspace(var.ssh_public_key)
-    user_data           = base64encode(file("${path.module}/cloud-init.yaml"))
+    user_data           = base64encode(local.cloud_init_content)
   }
 
   instance_options {
@@ -141,7 +148,7 @@ resource "oci_core_instance" "relay_restore" {
 
   metadata = {
     ssh_authorized_keys = trimspace(var.ssh_public_key)
-    user_data           = base64encode(file("${path.module}/cloud-init.yaml"))
+    user_data           = base64encode(local.cloud_init_content)
   }
 
   instance_options {
