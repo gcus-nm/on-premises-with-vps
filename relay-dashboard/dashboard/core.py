@@ -20,6 +20,8 @@ from typing import Any, Callable, Iterable
 
 ROUTE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,27}$")
 GROUP_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,17}$")
+WIREGUARD_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+EXISTING_WIREGUARD_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 MANAGED_ROUTE_PREFIX = "ui-"
 PROTECTED_PUBLIC_PORTS = {22, 51820}
 MAX_BULK_PORTS = 64
@@ -148,6 +150,62 @@ class RelayRoute:
             self.public_port,
             self.target_address,
             self.target_port,
+        )
+
+
+@dataclass(frozen=True)
+class WireGuardPeer:
+    name: str
+    address: str
+    cidr: str
+    public_key: str
+
+
+@dataclass(frozen=True)
+class PeerAccessRule:
+    name: str
+    protocol: str
+    source_address: str
+    target_address: str
+    target_port: int
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: dict[str, Any],
+        relay_network: str = "10.99.0.0/24",
+        relay_address: str = "10.99.0.1",
+        *,
+        existing_name: bool = False,
+    ) -> "PeerAccessRule":
+        name = normalize_wireguard_name(
+            value.get("name"),
+            "アクセスルール名",
+            existing=existing_name,
+        )
+        protocol = str(value.get("protocol", "")).strip().lower()
+        if protocol not in {"tcp", "udp"}:
+            raise ValidationError("プロトコルはTCPまたはUDPにしてください。")
+        source_address = normalize_peer_ip(
+            value.get("source_address"),
+            "接続元アドレス",
+            relay_network,
+            relay_address,
+        )
+        target_address = normalize_peer_ip(
+            value.get("target_address"),
+            "接続先アドレス",
+            relay_network,
+            relay_address,
+        )
+        if source_address == target_address:
+            raise ValidationError("接続元と接続先には異なるPeerを指定してください。")
+        return cls(
+            name=name,
+            protocol=protocol,
+            source_address=source_address,
+            target_address=target_address,
+            target_port=parse_port(value.get("target_port"), "接続先ポート"),
         )
 
 
@@ -295,6 +353,160 @@ def parse_relay_routes(output: str) -> dict[str, RelayRoute]:
             raise DashboardError(f"リレー経路一覧のポートを解析できません: {line}") from exc
         routes[name] = route
     return routes
+
+
+def normalize_wireguard_name(
+    value: Any,
+    label: str,
+    *,
+    existing: bool = False,
+) -> str:
+    normalized = str(value or "").strip()
+    pattern = EXISTING_WIREGUARD_NAME_PATTERN if existing else WIREGUARD_NAME_PATTERN
+    if not existing:
+        normalized = normalized.lower()
+    if not pattern.fullmatch(normalized):
+        if existing:
+            raise ValidationError(
+                f"{label}は英数字で始まる1〜32文字とし、ハイフンとアンダースコアだけを追加で使用できます。"
+            )
+        raise ValidationError(
+            f"{label}は小文字英数字で始まる1〜32文字とし、ハイフンだけを追加で使用できます。"
+        )
+    return normalized
+
+
+def normalize_peer_address(
+    value: Any,
+    relay_network: str = "10.99.0.0/24",
+    relay_address: str = "10.99.0.1",
+) -> str:
+    text = str(value or "").strip()
+    if "/" not in text:
+        text = f"{text}/32"
+    try:
+        interface = ipaddress.ip_interface(text)
+        network = ipaddress.ip_network(relay_network, strict=False)
+        server = ipaddress.ip_address(relay_address)
+    except ValueError as exc:
+        raise ValidationError(f"WireGuard Peerアドレスが不正です: {exc}") from exc
+    if interface.version != 4 or interface.network.prefixlen != 32:
+        raise ValidationError("WireGuard PeerアドレスはIPv4の/32で指定してください。")
+    if interface.ip not in network or interface.ip in {
+        network.network_address,
+        network.broadcast_address,
+        server,
+    }:
+        raise ValidationError(
+            f"WireGuard Peerアドレスには{network}内の利用可能なアドレスを指定してください。"
+        )
+    return f"{interface.ip}/32"
+
+
+def normalize_peer_ip(
+    value: Any,
+    label: str,
+    relay_network: str,
+    relay_address: str,
+) -> str:
+    try:
+        return str(
+            ipaddress.ip_interface(
+                normalize_peer_address(value, relay_network, relay_address)
+            ).ip
+        )
+    except ValidationError as exc:
+        raise ValidationError(f"{label}が不正です。{exc}") from exc
+
+
+def parse_wireguard_peers(output: str) -> dict[str, WireGuardPeer]:
+    peers: dict[str, WireGuardPeer] = {}
+    for line_number, raw_line in enumerate(output.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("NAME\t"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 3:
+            raise DashboardError(f"WireGuard Peer一覧の{line_number}行目を解析できません。")
+        name, cidr, public_key = fields
+        try:
+            interface = ipaddress.ip_interface(cidr)
+        except ValueError as exc:
+            raise DashboardError(f"WireGuard Peerアドレスを解析できません: {cidr}") from exc
+        if interface.version != 4 or interface.network.prefixlen != 32:
+            raise DashboardError(f"WireGuard Peerアドレスが/32ではありません: {cidr}")
+        peers[name] = WireGuardPeer(
+            name=name,
+            address=str(interface.ip),
+            cidr=f"{interface.ip}/32",
+            public_key=public_key,
+        )
+    return peers
+
+
+def parse_peer_access_rules(output: str) -> dict[str, PeerAccessRule]:
+    rules: dict[str, PeerAccessRule] = {}
+    for line_number, raw_line in enumerate(output.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("NAME\t"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 4:
+            raise DashboardError(f"Peer間アクセス一覧の{line_number}行目を解析できません。")
+        name, protocol, source_address, target = fields
+        if ":" not in target:
+            raise DashboardError(f"Peer間アクセスの接続先を解析できません: {target}")
+        target_address, target_port_text = target.rsplit(":", 1)
+        try:
+            target_port = int(target_port_text)
+        except ValueError as exc:
+            raise DashboardError(f"Peer間アクセスのポートを解析できません: {line}") from exc
+        rules[name] = PeerAccessRule(
+            name=name,
+            protocol=protocol,
+            source_address=source_address,
+            target_address=target_address,
+            target_port=target_port,
+        )
+    return rules
+
+
+def parse_wireguard_status(output: str) -> dict[str, dict[str, str]]:
+    statuses: dict[str, dict[str, str]] = {}
+    current_key = ""
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line.startswith("peer: "):
+            current_key = line.removeprefix("peer: ").strip()
+            statuses[current_key] = {}
+            continue
+        if not current_key or ":" not in line:
+            continue
+        label, value = line.split(":", 1)
+        if label in {"endpoint", "latest handshake", "transfer"}:
+            statuses[current_key][label.replace(" ", "_")] = value.strip()
+    return statuses
+
+
+def suggest_peer_address(
+    peers: Iterable[WireGuardPeer],
+    relay_network: str,
+    relay_address: str,
+) -> str:
+    try:
+        network = ipaddress.ip_network(relay_network, strict=False)
+        server = ipaddress.ip_address(relay_address)
+    except ValueError as exc:
+        raise ValidationError(f"WireGuardネットワーク設定が不正です: {exc}") from exc
+    used = {ipaddress.ip_address(peer.address) for peer in peers}
+    candidate_value = int(network.network_address) + 1
+    last_value = int(network.broadcast_address)
+    while candidate_value < last_value:
+        candidate = ipaddress.ip_address(candidate_value)
+        if candidate != server and candidate not in used:
+            return str(candidate)
+        candidate_value += 1
+    raise ConflictError(f"{network}に空きPeerアドレスがありません。")
 
 
 def analyze_terraform_plan(plan: dict[str, Any]) -> dict[str, Any]:
@@ -1169,6 +1381,158 @@ class RelayManager:
 
     def list(self) -> dict[str, RelayRoute]:
         return parse_relay_routes(self._run(["forward", "list"]).stdout)
+
+    def list_peers(self) -> dict[str, WireGuardPeer]:
+        return parse_wireguard_peers(self._run(["list"]).stdout)
+
+    def list_peer_access_rules(self) -> dict[str, PeerAccessRule]:
+        return parse_peer_access_rules(self._run(["peer-forward", "list"]).stdout)
+
+    def wireguard_state(
+        self,
+        relay_network: str,
+        relay_address: str,
+        dashboard_target_address: str,
+        dashboard_port: int,
+    ) -> dict[str, Any]:
+        peers = self.list_peers()
+        statuses = parse_wireguard_status(self._run(["status"]).stdout)
+        rules = self.list_peer_access_rules()
+        references: dict[str, list[str]] = {peer.address: [] for peer in peers.values()}
+        for rule in rules.values():
+            references.setdefault(rule.source_address, []).append(rule.name)
+            references.setdefault(rule.target_address, []).append(rule.name)
+        peer_rows = []
+        for peer in sorted(
+            peers.values(),
+            key=lambda item: int(ipaddress.ip_address(item.address)),
+        ):
+            status = statuses.get(peer.public_key, {})
+            peer_rows.append(
+                {
+                    **asdict(peer),
+                    "endpoint": status.get("endpoint", ""),
+                    "latest_handshake": status.get("latest_handshake", "未接続"),
+                    "transfer": status.get("transfer", ""),
+                    "access_rules": sorted(references.get(peer.address, [])),
+                }
+            )
+        return {
+            "peers": peer_rows,
+            "access_rules": [
+                asdict(rule) for rule in sorted(rules.values(), key=lambda item: item.name)
+            ],
+            "suggested_address": suggest_peer_address(
+                peers.values(),
+                relay_network,
+                relay_address,
+            ),
+            "relay_network": relay_network,
+            "relay_address": relay_address,
+            "dashboard_target_address": dashboard_target_address,
+            "dashboard_port": dashboard_port,
+        }
+
+    def create_peer(
+        self,
+        name: Any,
+        address: Any,
+        relay_network: str,
+        relay_address: str,
+    ) -> tuple[str, str]:
+        normalized_name = normalize_wireguard_name(name, "Peer名")
+        normalized_address = normalize_peer_address(
+            address,
+            relay_network,
+            relay_address,
+        )
+        result = self._run(
+            [
+                "add",
+                normalized_name,
+                "--address",
+                normalized_address,
+                "--output",
+                "-",
+            ]
+        )
+        if not result.stdout.startswith("[Interface]"):
+            raise CommandError(
+                "Peerは追加されましたが、接続設定を取得できませんでした。鍵を更新して再発行してください。",
+                result.stderr,
+            )
+        return normalized_name, result.stdout + "\n"
+
+    def rotate_peer(self, name: Any) -> tuple[str, str]:
+        normalized_name = normalize_wireguard_name(name, "Peer名", existing=True)
+        peers = self.list_peers()
+        peer = peers.get(normalized_name)
+        if peer is None:
+            raise ValidationError(f"WireGuard Peerが見つかりません: {normalized_name}")
+        result = self._run(
+            [
+                "update",
+                normalized_name,
+                "--address",
+                peer.cidr,
+                "--output",
+                "-",
+            ]
+        )
+        if not result.stdout.startswith("[Interface]"):
+            raise CommandError(
+                "Peerの鍵は更新されましたが、接続設定を取得できませんでした。もう一度更新してください。",
+                result.stderr,
+            )
+        return normalized_name, result.stdout + "\n"
+
+    def delete_peer(self, name: Any) -> str:
+        normalized_name = normalize_wireguard_name(name, "Peer名", existing=True)
+        self._run(["delete", normalized_name, "--yes"])
+        return normalized_name
+
+    def create_peer_access_rule(self, rule: PeerAccessRule) -> None:
+        self._run(
+            [
+                "peer-forward",
+                "add",
+                rule.name,
+                "--protocol",
+                rule.protocol,
+                "--source-address",
+                rule.source_address,
+                "--target-address",
+                rule.target_address,
+                "--target-port",
+                str(rule.target_port),
+            ]
+        )
+
+    def update_peer_access_rule(self, rule: PeerAccessRule) -> None:
+        self._run(
+            [
+                "peer-forward",
+                "update",
+                rule.name,
+                "--protocol",
+                rule.protocol,
+                "--source-address",
+                rule.source_address,
+                "--target-address",
+                rule.target_address,
+                "--target-port",
+                str(rule.target_port),
+            ]
+        )
+
+    def delete_peer_access_rule(self, name: Any) -> str:
+        normalized_name = normalize_wireguard_name(
+            name,
+            "アクセスルール名",
+            existing=True,
+        )
+        self._run(["peer-forward", "delete", normalized_name, "--yes"])
+        return normalized_name
 
     def check_conflicts(
         self,

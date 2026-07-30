@@ -1,11 +1,13 @@
 # OCI Relay Control
 
 OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザから追加・更新・有効化・
-無効化する管理画面です。Windows 11のDocker Desktop上で動作し、次の2つをまとめて
+無効化する管理画面です。Windows 11のDocker Desktop上で動作し、次の機能をまとめて
 反映します。
 
 - TerraformによるOCI Network Security Groupの公開ポート
 - `wg-relay`によるOCIからWireGuard PeerへのDNAT・SNAT
+- WireGuard Peerの追加・鍵更新・削除
+- WireGuard Peer間のTCP/UDPアクセス制御
 
 管理画面はGUIで経路を保存しただけではOCIを変更しません。Terraform planを作成し、内容がOCI NSGの公開ルールだけであることを自動検査した後、確認欄へ`APPLY`と入力した場合だけ反映します。
 
@@ -14,15 +16,18 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 このコンテナはTerraformとOCIリレーを操作できる強い権限を持ちます。
 
 - 既定では`127.0.0.1:41800`だけで待ち受ける
+- WireGuard経由で公開する場合も、WindowsではWireGuardサブネットとTCP/41800だけを許可する
+- Web UIへ到達できるPeerはOCIのPeer間アクセスルールで個別に制御する
 - HTTP Basic認証を必須にする
 - 状態変更APIへCSRFトークンを要求する
 - OCI API鍵とSSH鍵はGit管理対象外にする
 - 資格情報ディレクトリはコンテナへ読み取り専用でマウントする
 - リポジトリ全体は渡さず、Terraformと管理スクリプトの必要ファイルだけをマウントする
 - コンテナ起動時に資格情報をtmpfsへコピーし、`0600`で使用する
+- 新規・更新したPeerの秘密鍵はディスクへ保存せず、一度だけブラウザへ返す
 - Docker socketはマウントしない
 - Linux Capabilityをすべて削除する
-- GUI管理ルールには`ui-`を付け、既存の手動ルールを削除しない
+- 公開経路のGUI管理ルールには`ui-`を付け、既存の手動公開ルールを削除しない
 - Terraform planにNSG公開ルール以外の変更が含まれたらapplyを禁止する
 
 管理画面をインターネットへ直接公開しないでください。
@@ -35,6 +40,8 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - OCIリレーの転送先WireGuardアドレスとポート
 - GUI管理経路の追加・更新・有効化・無効化・削除
 - TCP/UDPを混在できるポートグループと最大64ポートの一括追加
+- WireGuard Peerの追加、状態確認、鍵ローテーション、削除
+- Peer間アクセスルールの追加、更新、削除
 - Terraform planとapply
 - OCIリレー状態、環境チェック、操作履歴
 
@@ -43,8 +50,8 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - Dockerコンテナ自身のポート公開
 - MyDNSのAレコード
 - Minecraftのmc-routerホスト名マッピング
-- WireGuard Peerの作成
-- Windows FirewallのGUIからの直接変更
+- `wg-relay`の初回インストール、初期化、サーバー鍵の再生成
+- Windows Firewallの直接変更
 
 ゲームコンテナがWindowsホストへ対象ポートを公開していることは、事前に`docker ps`で確認してください。
 
@@ -284,35 +291,75 @@ Mac側管理スクリプトからも確認できます。
 ./scripts/wg-relay.sh forward status
 ```
 
-## Macから管理画面を開く場合
+## Web UIでWireGuardを管理する
 
-既定の`127.0.0.1`はMiniPC自身からだけアクセスできます。MacのWireGuardアドレスが`10.99.0.3`の場合、`relay-dashboard/.env`を次のように変更します。
+画面下部の「WireGuard管理」では、OCI上の`wg-relay`へ直接反映されているPeerと
+Peer間アクセスルールを管理します。公開経路とは異なり、Terraform planや`APPLY`は
+使用せず、各操作がOCIへ即時反映されます。
+
+Peer一覧では、WireGuardアドレス、Endpoint、最新ハンドシェイク、通信量、参照中の
+アクセスルールを確認できます。
+
+「＋ Peer」でPeer名とアドレスを入力すると、空きアドレスが自動提案され、
+接続設定ファイルが一度だけダウンロードされます。接続設定には秘密鍵が含まれるため、
+対象端末へ安全に移動してWireGuardへインポートしてください。管理画面やOCIのディスクへ
+秘密鍵は保存されません。紛失時は「鍵を更新」で既存鍵を失効させて再発行します。
+
+Peerカードの「アクセス追加」では、接続元、接続先、TCP/UDP、接続先ポートを指定します。
+Web UIアクセスの場合はMiniPCの`10.99.0.2`とTCP/41800が自動入力されます。
+RDPなど任意のPeer間ルールも同じ画面で追加・編集・削除できます。
+
+Peerを削除する前に、そのPeerを参照しているアクセスルールをすべて削除してください。
+OCI側も参照中Peerの削除を拒否します。
+
+## WireGuard経由で管理画面を開くための初期設定
+
+Web UI自身へ初めて接続する経路だけは、Web UIを利用する前に一度だけ設定します。
+管理画面を動かすMiniPCを`10.99.0.2`、最初の管理端末を`10.99.0.3`、
+管理画面ポートを`41800`とします。
+
+MiniPCの`relay-dashboard/.env`で、公開先をMiniPCのWireGuardアドレスへ変更します。
+`0.0.0.0`はLAN側でも待ち受けるため使用しません。
 
 ```dotenv
-RELAY_DASHBOARD_BIND_IP=0.0.0.0
+RELAY_DASHBOARD_BIND_IP=10.99.0.2
 ```
 
-管理者PowerShellで管理画面ポートだけをMacへ許可します。
+Windows Firewallは管理画面のローカルアドレスとTCP/41800をWireGuardサブネットだけへ
+一度許可します。個々のPeerを許可するかどうかはOCI側のアクセスルールで制御します。
 
 ```powershell
-New-NetFirewallRule `
-  -DisplayName "Relay Dashboard from Mac" `
-  -Direction Inbound `
-  -Action Allow `
-  -Protocol TCP `
-  -LocalAddress 10.99.0.2 `
-  -LocalPort 41800 `
-  -RemoteAddress 10.99.0.3 `
-  -Profile Any
+.\scripts\relay-dashboard-firewall.ps1 add -DashboardClientAddress 10.99.0.0/24
+.\scripts\relay-dashboard-firewall.ps1 status
 ```
 
-コンテナを再作成した後、Macから次を開きます。
+最初の管理端末だけはMacなどの管理環境からOCI ACLを追加します。現在の
+`mac-admin (10.99.0.3)`では`mac-to-relay-dashboard`ルールを使用します。ルールが
+存在しない場合だけ追加してください。
+
+```bash
+./scripts/wg-relay.sh peer-forward add mac-to-relay-dashboard --protocol tcp --source-address 10.99.0.3 --target-address 10.99.0.2 --target-port 41800
+```
+
+以後のPeer追加とWeb UIアクセス許可は管理画面から実行できます。コンテナを再作成した後、
+WireGuard接続中の許可済みPeerから次を開きます。
+
+```powershell
+.\scripts\rebuild-relay-dashboard.ps1
+```
 
 ```text
 http://10.99.0.2:41800
 ```
 
-HTTP Basic認証の内容はWireGuardトンネルで暗号化されます。LANやインターネットへ同じポートを公開しないでください。
+接続できない場合はWindowsでローカル応答を確認します。
+
+```powershell
+Test-NetConnection 10.99.0.2 -Port 41800
+```
+
+HTTP Basic認証の内容はWireGuardトンネルで暗号化されます。OCI NSG、自宅ルーター、
+LAN側アドレスではTCP/41800を公開しないでください。
 
 ## 停止とデータ
 

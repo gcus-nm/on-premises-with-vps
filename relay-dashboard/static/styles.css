@@ -580,6 +580,16 @@ td.description-cell {
   color: var(--text);
 }
 
+.small-button.danger {
+  border-color: rgb(255 122 134 / 28%);
+  color: #e99aa3;
+}
+
+.small-button.danger:hover {
+  border-color: rgb(255 122 134 / 55%);
+  color: #ffc2c8;
+}
+
 .small-button:disabled {
   cursor: not-allowed;
   opacity: 0.4;
@@ -955,6 +965,195 @@ td.description-cell {
   color: var(--danger);
 }
 
+.wireguard-section {
+  margin-top: 28px;
+  padding-bottom: 56px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.section-heading h2 {
+  margin: 3px 0 8px;
+  font-size: 24px;
+}
+
+.section-heading p:last-child {
+  max-width: 720px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.wireguard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+.wireguard-panel {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.panel-note {
+  margin: 0;
+  padding: 0 20px 15px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.wireguard-list {
+  display: grid;
+  gap: 10px;
+  padding: 0 18px 18px;
+}
+
+.wireguard-item {
+  display: grid;
+  gap: 12px;
+  padding: 15px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1512;
+}
+
+.wireguard-item-heading,
+.wireguard-item-actions,
+.wireguard-flow {
+  display: flex;
+  align-items: center;
+}
+
+.wireguard-item-heading {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wireguard-item-heading strong {
+  font-size: 13px;
+}
+
+.wireguard-item-heading small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.wireguard-peer-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.wireguard-peer-meta div {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+}
+
+.wireguard-peer-meta span,
+.wireguard-peer-meta strong {
+  display: block;
+}
+
+.wireguard-peer-meta span {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.wireguard-peer-meta strong {
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wireguard-item-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.wireguard-flow {
+  flex-wrap: wrap;
+  gap: 7px;
+  color: #cfe2da;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+}
+
+.wireguard-flow-arrow {
+  color: var(--accent);
+}
+
+.wireguard-reference {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.wireguard-error {
+  min-height: 18px;
+  margin: 12px 2px 0;
+  color: var(--danger);
+  font-size: 11px;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.status-dot.connected {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgb(64 216 139 / 9%);
+}
+
+.dialog-fields {
+  display: grid;
+  gap: 18px;
+  margin: 20px 25px 0;
+}
+
+.dialog-fields .field-grid {
+  margin-top: 0;
+}
+
+.secret-notice {
+  padding: 14px;
+  border: 1px solid rgb(239 188 92 / 35%);
+  border-radius: 8px;
+  background: rgb(239 188 92 / 7%);
+}
+
+.secret-notice strong {
+  color: #f2ce88;
+  font-size: 11px;
+}
+
+.secret-notice p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.65;
+}
+
 .muted {
   color: var(--muted);
   font-size: 12px;
@@ -1247,6 +1446,10 @@ code {
     grid-template-columns: 1fr;
   }
 
+  .wireguard-grid {
+    grid-template-columns: 1fr;
+  }
+
   .side-stack {
     grid-template-columns: 1fr 1fr;
   }
@@ -1258,7 +1461,8 @@ code {
   }
 
   .topbar,
-  .panel-heading {
+  .panel-heading,
+  .section-heading {
     align-items: flex-start;
     flex-direction: column;
     gap: 16px;
@@ -1311,6 +1515,10 @@ code {
 
   .side-stack,
   .field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .wireguard-peer-meta {
     grid-template-columns: 1fr;
   }
 

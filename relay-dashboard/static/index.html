@@ -176,6 +176,61 @@
             </article>
           </aside>
         </section>
+
+        <section class="wireguard-section" aria-labelledby="wireguard-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">PRIVATE NETWORK CONTROL</p>
+              <h2 id="wireguard-heading">WireGuard管理</h2>
+              <p>
+                Peer、鍵、Peer間アクセスをOCIへ即時反映します。
+                クライアント秘密鍵は管理画面へ保存しません。
+              </p>
+            </div>
+            <button class="button button-quiet" id="wireguard-refresh-button" type="button">
+              状態を更新
+            </button>
+          </div>
+
+          <div class="wireguard-grid">
+            <article class="panel wireguard-panel">
+              <div class="panel-heading compact">
+                <div>
+                  <p class="eyebrow">PEER INVENTORY</p>
+                  <h2>Peer</h2>
+                </div>
+                <button class="button button-primary" id="new-peer-button" type="button">
+                  ＋ Peer
+                </button>
+              </div>
+              <p class="panel-note" id="wireguard-peer-summary">
+                OCIからPeer状態を読み込んでいます。
+              </p>
+              <div class="wireguard-list" id="wireguard-peer-list">
+                <p class="muted">読み込み中です。</p>
+              </div>
+            </article>
+
+            <article class="panel wireguard-panel">
+              <div class="panel-heading compact">
+                <div>
+                  <p class="eyebrow">PEER ACCESS CONTROL</p>
+                  <h2>Peer間アクセス</h2>
+                </div>
+                <button class="button button-primary" id="new-access-rule-button" type="button">
+                  ＋ アクセス
+                </button>
+              </div>
+              <p class="panel-note">
+                OCIのWireGuard ACLへ即時反映します。公開NSGやTerraformは変更しません。
+              </p>
+              <div class="wireguard-list" id="wireguard-access-list">
+                <p class="muted">読み込み中です。</p>
+              </div>
+            </article>
+          </div>
+          <p class="wireguard-error" id="wireguard-error" role="alert"></p>
+        </section>
       </main>
     </div>
 
@@ -338,6 +393,127 @@
           >キャンセル</button>
           <button class="button button-primary" id="save-group-button" type="button">
             保存
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="peer-dialog">
+      <form method="dialog" id="peer-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">WIREGUARD PEER</p>
+            <h2>Peerを追加</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            aria-label="閉じる"
+            type="submit"
+            formnovalidate
+          >×</button>
+        </div>
+        <div class="dialog-fields">
+          <label>
+            <span>Peer名</span>
+            <input
+              id="peer-name"
+              required
+              maxlength="32"
+              pattern="[a-z0-9][a-z0-9-]{0,31}"
+              placeholder="laptop2"
+              autocomplete="off"
+            >
+            <small>小文字英数字とハイフン、最大32文字。</small>
+          </label>
+          <label>
+            <span>WireGuardアドレス</span>
+            <input id="peer-address" required placeholder="10.99.0.4" autocomplete="off">
+            <small>空きアドレスを自動入力します。設定ファイルでは/32になります。</small>
+          </label>
+          <div class="secret-notice">
+            <strong>接続設定は一度だけダウンロードされます</strong>
+            <p>
+              秘密鍵はOCI・管理画面・Dockerボリュームへ保存しません。
+              紛失した場合は鍵を更新して再発行してください。
+            </p>
+          </div>
+        </div>
+        <p class="form-error" id="peer-form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="button button-quiet" value="cancel" type="submit" formnovalidate>
+            キャンセル
+          </button>
+          <button class="button button-primary" id="save-peer-button" type="button">
+            追加して設定を保存
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="access-rule-dialog">
+      <form method="dialog" id="access-rule-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">PEER ACCESS RULE</p>
+            <h2 id="access-rule-dialog-title">Peer間アクセスを追加</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            aria-label="閉じる"
+            type="submit"
+            formnovalidate
+          >×</button>
+        </div>
+        <input type="hidden" id="access-rule-original-name">
+        <div class="dialog-fields">
+          <label>
+            <span>ルール名</span>
+            <input
+              id="access-rule-name"
+              required
+              maxlength="32"
+              pattern="[a-z0-9][a-z0-9-]{0,31}"
+              placeholder="laptop2-to-dashboard"
+              autocomplete="off"
+            >
+          </label>
+          <div class="field-grid">
+            <label>
+              <span>接続元Peer</span>
+              <select id="access-source" required></select>
+            </label>
+            <label>
+              <span>接続先Peer</span>
+              <select id="access-target" required></select>
+            </label>
+          </div>
+          <div class="field-grid">
+            <label>
+              <span>プロトコル</span>
+              <select id="access-protocol">
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+              </select>
+            </label>
+            <label>
+              <span>接続先ポート</span>
+              <input id="access-target-port" type="number" min="1" max="65535" required>
+            </label>
+          </div>
+          <p class="muted">
+            保存・更新するとOCIへ即時反映されます。Windows側ではWireGuardサブネットから
+            対象ローカルアドレス・ポートへの受信をFirewallで許可してください。
+          </p>
+        </div>
+        <p class="form-error" id="access-rule-form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="button button-quiet" value="cancel" type="submit" formnovalidate>
+            キャンセル
+          </button>
+          <button class="button button-primary" id="save-access-rule-button" type="button">
+            OCIへ反映
           </button>
         </div>
       </form>

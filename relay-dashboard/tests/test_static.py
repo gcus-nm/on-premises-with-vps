@@ -76,6 +76,30 @@ class RouteDialogMarkupTests(unittest.TestCase):
         self.assertIn('id="group-dialog"', html)
         self.assertIn('id="route-advanced"', html)
 
+    def test_wireguard_peer_and_access_management_are_present(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        html = (project_root / "relay-dashboard/static/index.html").read_text(
+            encoding="utf-8"
+        )
+        javascript = (project_root / "relay-dashboard/static/app.js").read_text(
+            encoding="utf-8"
+        )
+
+        for element_id in (
+            "wireguard-peer-list",
+            "wireguard-access-list",
+            "peer-dialog",
+            "access-rule-dialog",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        for endpoint in (
+            "/api/wireguard",
+            "/api/wireguard/peers",
+            "/api/wireguard/access-rules",
+        ):
+            self.assertIn(endpoint, javascript)
+        self.assertIn("downloadClientConfig", javascript)
+
 
 if __name__ == "__main__":
     unittest.main()

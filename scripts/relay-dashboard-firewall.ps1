@@ -4,7 +4,10 @@ param(
     [ValidateSet("add", "status", "remove")]
     [string]$Action,
     [string]$RelayAddress = "10.99.0.1",
-    [string]$MiniPcAddress = "10.99.0.2"
+    [string]$MiniPcAddress = "10.99.0.2",
+    [string[]]$DashboardClientAddress = @(),
+    [ValidateRange(1, 65535)]
+    [int]$DashboardPort = 41800
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +16,8 @@ Set-StrictMode -Version Latest
 $RuleGroup = "OCI Relay Dashboard"
 $TcpRuleName = "OCI Relay to MiniPC TCP"
 $UdpRuleName = "OCI Relay to MiniPC UDP"
+$DashboardRuleName = "WireGuard Peers to Relay Dashboard TCP"
+$LegacyDashboardRuleName = "Relay Dashboard from Mac"
 
 function Assert-Administrator {
     $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -26,6 +31,8 @@ switch ($Action) {
     "add" {
         Assert-Administrator
         Get-NetFirewallRule -Group $RuleGroup -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule
+        Get-NetFirewallRule -DisplayName $LegacyDashboardRuleName -ErrorAction SilentlyContinue |
             Remove-NetFirewallRule
 
         New-NetFirewallRule `
@@ -48,7 +55,23 @@ switch ($Action) {
             -RemoteAddress $RelayAddress `
             -Profile Any | Out-Null
 
+        if ($DashboardClientAddress.Count -gt 0) {
+            New-NetFirewallRule `
+                -DisplayName $DashboardRuleName `
+                -Group $RuleGroup `
+                -Direction Inbound `
+                -Action Allow `
+                -Protocol TCP `
+                -LocalAddress $MiniPcAddress `
+                -LocalPort $DashboardPort `
+                -RemoteAddress $DashboardClientAddress `
+                -Profile Any | Out-Null
+        }
+
         Write-Host "WireGuard上の $RelayAddress から $MiniPcAddress へのTCP/UDP受信を許可しました。"
+        if ($DashboardClientAddress.Count -gt 0) {
+            Write-Host "管理画面TCP/${DashboardPort}への接続を次のWireGuard Peerへ許可しました: $($DashboardClientAddress -join ', ')"
+        }
     }
     "status" {
         $Rules = Get-NetFirewallRule -Group $RuleGroup -ErrorAction SilentlyContinue
@@ -61,12 +84,18 @@ switch ($Action) {
             Select-Object InstanceID, LocalAddress, RemoteAddress |
             Format-Table -AutoSize
         $Rules |
+            Get-NetFirewallPortFilter |
+            Select-Object InstanceID, Protocol, LocalPort, RemotePort |
+            Format-Table -AutoSize
+        $Rules |
             Select-Object DisplayName, Enabled, Direction, Action, Profile |
             Format-Table -AutoSize
     }
     "remove" {
         Assert-Administrator
         Get-NetFirewallRule -Group $RuleGroup -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule
+        Get-NetFirewallRule -DisplayName $LegacyDashboardRuleName -ErrorAction SilentlyContinue |
             Remove-NetFirewallRule
         Write-Host "管理対象のWindows Firewallルールを削除しました。"
     }

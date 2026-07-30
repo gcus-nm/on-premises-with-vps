@@ -159,6 +159,148 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(deleted_status, 200)
         self.assertEqual(deleted["routes"], [])
 
+    def test_wireguard_peer_and_access_rule_apis(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        inventory = {
+            "peers": [
+                {
+                    "name": "windows-minibox",
+                    "address": "10.99.0.2",
+                    "cidr": "10.99.0.2/32",
+                    "public_key": "windows-key",
+                    "endpoint": "",
+                    "latest_handshake": "1 minute ago",
+                    "transfer": "1 MiB received, 2 MiB sent",
+                    "access_rules": [],
+                }
+            ],
+            "access_rules": [],
+            "suggested_address": "10.99.0.3",
+            "relay_network": "10.99.0.0/24",
+            "relay_address": "10.99.0.1",
+            "dashboard_target_address": "10.99.0.2",
+            "dashboard_port": 41800,
+        }
+        self.app.relay.wireguard_state = Mock(return_value=inventory)  # type: ignore[method-assign]
+        status, payload = self.request("/api/wireguard")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["suggested_address"], "10.99.0.3")
+
+        self.app.relay.create_peer = Mock(  # type: ignore[method-assign]
+            return_value=(
+                "mac-admin",
+                "[Interface]\nPrivateKey = generated\nAddress = 10.99.0.3/32\n",
+            )
+        )
+        status, created = self.request(
+            "/api/wireguard/peers",
+            method="POST",
+            body={"name": "mac-admin", "address": "10.99.0.3"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["filename"], "mac-admin.conf")
+        self.assertIn("PrivateKey", created["client_config"])
+        self.assertNotIn(
+            "PrivateKey",
+            (Path(self.temporary.name) / "audit.jsonl").read_text(encoding="utf-8"),
+        )
+
+        self.app.relay.rotate_peer = Mock(  # type: ignore[method-assign]
+            return_value=(
+                "mac-admin",
+                "[Interface]\nPrivateKey = rotated\nAddress = 10.99.0.3/32\n",
+            )
+        )
+        status, rotated = self.request(
+            "/api/wireguard/peers/mac-admin/rotate",
+            method="POST",
+            body={"confirmation": "ROTATE"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("rotated", rotated["client_config"])
+
+        self.app.relay.create_peer_access_rule = Mock()  # type: ignore[method-assign]
+        access_payload = {
+            "name": "mac-to-dashboard",
+            "protocol": "tcp",
+            "source_address": "10.99.0.3",
+            "target_address": "10.99.0.2",
+            "target_port": 41800,
+        }
+        status, _ = self.request(
+            "/api/wireguard/access-rules",
+            method="POST",
+            body=access_payload,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 201)
+        created_rule = self.app.relay.create_peer_access_rule.call_args.args[0]
+        self.assertEqual(created_rule.target_port, 41800)
+
+        self.app.relay.update_peer_access_rule = Mock()  # type: ignore[method-assign]
+        status, _ = self.request(
+            "/api/wireguard/access-rules/mac-to-dashboard",
+            method="PUT",
+            body={**access_payload, "target_port": 8443},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        updated_rule = self.app.relay.update_peer_access_rule.call_args.args[0]
+        self.assertEqual(updated_rule.target_port, 8443)
+
+        self.app.relay.delete_peer_access_rule = Mock(  # type: ignore[method-assign]
+            return_value="mac-to-dashboard"
+        )
+        status, _ = self.request(
+            "/api/wireguard/access-rules/mac-to-dashboard",
+            method="DELETE",
+            body={"confirmation": "DELETE"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+
+        self.app.relay.delete_peer = Mock(return_value="mac-admin")  # type: ignore[method-assign]
+        status, _ = self.request(
+            "/api/wireguard/peers/mac-admin",
+            method="DELETE",
+            body={"confirmation": "mac-admin"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+
+    def test_wireguard_mutations_require_csrf_and_confirmations(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        status, _ = self.request(
+            "/api/wireguard/peers",
+            method="POST",
+            body={"name": "mac-admin", "address": "10.99.0.3"},
+        )
+        self.assertEqual(status, 403)
+
+        self.app.relay.rotate_peer = Mock()  # type: ignore[method-assign]
+        status, _ = self.request(
+            "/api/wireguard/peers/mac-admin/rotate",
+            method="POST",
+            body={"confirmation": "wrong"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 400)
+        self.app.relay.rotate_peer.assert_not_called()
+
+        self.app.relay.delete_peer = Mock()  # type: ignore[method-assign]
+        status, _ = self.request(
+            "/api/wireguard/peers/mac-admin",
+            method="DELETE",
+            body={"confirmation": "wrong"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 400)
+        self.app.relay.delete_peer.assert_not_called()
+
     def test_applied_delete_cancel_and_history_purge(self) -> None:
         _, state = self.request("/api/state")
         csrf = str(state["csrf_token"])
