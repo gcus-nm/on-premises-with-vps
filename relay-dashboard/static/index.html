@@ -362,6 +362,13 @@
               placeholder="ゲーム用の公開ポート一式"
             >
           </label>
+          <label class="field-span">
+            <span>親グループ</span>
+            <select id="group-parent" name="parent_id">
+              <option value="">最上位グループ</option>
+            </select>
+            <small>親を選ぶと、そのグループ内のサブグループとして表示します。</small>
+          </label>
         </div>
         <div class="group-members-heading">
           <div>
@@ -378,7 +385,10 @@
         </div>
         <details class="advanced-zone" id="group-advanced" hidden>
           <summary>高度な操作</summary>
-          <p>グループだけを解除します。所属経路やOCIの設定は削除されません。</p>
+          <p>
+            グループだけを解除します。直下の経路とサブグループは1階層上へ移動し、
+            OCIの設定は削除されません。
+          </p>
           <button class="button button-danger" id="delete-group-button" type="button">
             グループを解除
           </button>

@@ -269,10 +269,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not self.acquire_operation():
                     return
                 try:
+                    parent_value = payload.get("parent_id")
                     group = self.app.store.create_group(
                         payload.get("name"),
                         payload.get("description", ""),
                         payload.get("members", []),
+                        parent_id=str(parent_value) if parent_value else None,
                     )
                     self.app.terraform.invalidate_plan()
                     self.app.audit.append("group-create", "success", group.name)
@@ -419,11 +421,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith(group_prefix):
                 group_id = unquote(path[len(group_prefix) :])
-                group = self.app.store.update_group(
-                    group_id,
-                    payload.get("name"),
-                    payload.get("description", ""),
-                )
+                if "parent_id" in payload:
+                    parent_value = payload.get("parent_id")
+                    group = self.app.store.update_group(
+                        group_id,
+                        payload.get("name"),
+                        payload.get("description", ""),
+                        str(parent_value) if parent_value else None,
+                    )
+                else:
+                    group = self.app.store.update_group(
+                        group_id,
+                        payload.get("name"),
+                        payload.get("description", ""),
+                    )
                 self.app.terraform.invalidate_plan()
                 self.app.audit.append("group-update", "success", group.name)
                 self.send_store_state()
