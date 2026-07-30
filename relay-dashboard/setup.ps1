@@ -102,10 +102,32 @@ try {
     finally {
         $ErrorActionPreference = $PreviousErrorActionPreference
     }
-    if ($SshKeyscanExitCode -ne 0 -or -not $ScannedKeys) {
-        throw "OCIのSSHホスト鍵を取得できません。WindowsのWireGuardを有効にしてping ${RelayAddress}を確認してください。"
+
+    $HostKeys = @(
+        $ScannedKeys |
+            Where-Object { $_ -match '(^|\s)ssh-ed25519\s' }
+    )
+    if ($HostKeys.Count -eq 0) {
+        $UserKnownHosts = Join-Path $env:USERPROFILE ".ssh\known_hosts"
+        if (Test-Path -LiteralPath $UserKnownHosts -PathType Leaf) {
+            $PreviousErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                $KnownHostMatches = & ssh-keygen -F $RelayAddress -f $UserKnownHosts 2>$null
+            }
+            finally {
+                $ErrorActionPreference = $PreviousErrorActionPreference
+            }
+            $HostKeys = @(
+                $KnownHostMatches |
+                    Where-Object { $_ -match '(^|\s)ssh-ed25519\s' }
+            )
+        }
     }
-    Write-Utf8NoBom -Path $KnownHostsTemporary -Content (($ScannedKeys -join "`n") + "`n")
+    if ($HostKeys.Count -eq 0) {
+        throw "OCIのSSHホスト鍵を取得できません。Windowsからssh ubuntu@${RelayAddress}へ一度接続し、known_hostsへ登録してください。ssh-keyscan終了コード: ${SshKeyscanExitCode}"
+    }
+    Write-Utf8NoBom -Path $KnownHostsTemporary -Content (($HostKeys -join "`n") + "`n")
     $FingerprintOutput = & ssh-keygen -lf $KnownHostsTemporary -E sha256
     if ($LASTEXITCODE -ne 0) {
         throw "SSHホスト鍵のフィンガープリントを確認できません。"
