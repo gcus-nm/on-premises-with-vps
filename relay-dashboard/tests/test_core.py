@@ -148,7 +148,14 @@ class RelayParsingTests(unittest.TestCase):
 
         manager = RelayManager(Path("/workspace/scripts/wg-relay.sh"), "oci-relay", runner)
         actions = manager.sync([route(target_port=25565)])
-        command_arguments = [item[1:] for item in commands]
+        self.assertTrue(commands)
+        self.assertTrue(
+            all(
+                command[:2] == ["bash", "/workspace/scripts/wg-relay.sh"]
+                for command in commands
+            )
+        )
+        command_arguments = [item[2:] for item in commands]
 
         self.assertIn(
             ["forward", "delete", "ui-minecraft", "--yes"],
