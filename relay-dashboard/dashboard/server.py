@@ -93,13 +93,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/state":
-            routes = self.app.store.list()
             self.send_json(
                 {
-                    "routes": [asdict(route) for route in routes],
+                    "routes": self.app.store.views(),
                     "plan": self.app.terraform.load_plan_metadata(),
                     "audit": self.app.audit.recent(),
                     "busy": self.app.operation_lock.locked(),
+                    "pending_relay": self.app.store.has_pending_relay(),
                     "csrf_token": self.app.csrf_token,
                 }
             )
@@ -115,10 +115,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/relay/status":
             try:
                 actual = self.app.relay.list()
-                desired = {route.remote_name: route for route in self.app.store.list()}
+                applied = {route.remote_name: route for route in self.app.store.applied()}
                 rows = []
                 for name, route in sorted(actual.items()):
-                    wanted = desired.get(name)
+                    wanted = applied.get(name)
                     matches = bool(
                         wanted
                         and (
@@ -152,11 +152,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             if path == "/api/routes":
-                route = self.app.route_from_payload(payload)
-                routes = self.app.store.create(route)
-                self.app.terraform.invalidate_plan()
-                self.app.audit.append("route-create", "success", route.name)
-                self.send_json({"routes": [asdict(item) for item in routes]}, HTTPStatus.CREATED)
+                if not self.acquire_operation():
+                    return
+                try:
+                    route = self.app.route_from_payload(payload)
+                    self.app.store.create(route)
+                    self.app.terraform.invalidate_plan()
+                    self.app.audit.append("route-create", "success", route.name)
+                    self.send_json({"routes": self.app.store.views()}, HTTPStatus.CREATED)
+                finally:
+                    self.app.operation_lock.release()
+                return
+            prefix = "/api/routes/"
+            suffix = "/cancel-delete"
+            if path.startswith(prefix) and path.endswith(suffix):
+                if not self.acquire_operation():
+                    return
+                try:
+                    record_id = unquote(path[len(prefix) : -len(suffix)])
+                    restored = self.app.store.cancel_delete(record_id)
+                    self.app.terraform.invalidate_plan()
+                    self.app.audit.append(
+                        "route-delete-cancel", "success", restored.route.name
+                    )
+                    self.send_json({"routes": self.app.store.views()})
+                finally:
+                    self.app.operation_lock.release()
                 return
             if path == "/api/plan":
                 self.create_plan()
@@ -180,43 +201,83 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not path.startswith(prefix):
             self.send_error_json(HTTPStatus.NOT_FOUND, "APIが見つかりません。")
             return
-        original_name = unquote(path[len(prefix) :])
+        record_id = unquote(path[len(prefix) :])
+        if not self.acquire_operation():
+            return
         try:
             route = self.app.route_from_payload(self.read_json())
-            routes = self.app.store.update(original_name, route)
+            updated = self.app.store.update(record_id, route)
             self.app.terraform.invalidate_plan()
             self.app.audit.append(
                 "route-update",
                 "success",
-                f"{original_name} -> {route.name}",
+                updated.route.name,
             )
-            self.send_json({"routes": [asdict(item) for item in routes]})
+            self.send_json({"routes": self.app.store.views()})
         except (DashboardError, ValueError) as exc:
             status = HTTPStatus.CONFLICT if isinstance(exc, ConflictError) else HTTPStatus.BAD_REQUEST
             self.send_error_json(status, str(exc), command_output(exc))
+        finally:
+            self.app.operation_lock.release()
 
     def do_DELETE(self) -> None:
         if not self.authenticate() or not self.validate_csrf():
             return
         path = urlparse(self.path).path
-        prefix = "/api/routes/"
-        if not path.startswith(prefix):
-            self.send_error_json(HTTPStatus.NOT_FOUND, "APIが見つかりません。")
+        if not self.acquire_operation():
             return
-        name = unquote(path[len(prefix) :])
         try:
-            routes = self.app.store.delete(name)
-            self.app.terraform.invalidate_plan()
-            self.app.audit.append("route-delete", "success", name)
-            self.send_json({"routes": [asdict(item) for item in routes]})
+            route_prefix = "/api/routes/"
+            history_prefix = "/api/deleted-routes/"
+            if path.startswith(route_prefix):
+                record_id = unquote(path[len(route_prefix) :])
+                record = next(
+                    (
+                        item
+                        for item in self.app.store.views()
+                        if item["id"] == record_id
+                    ),
+                    None,
+                )
+                if record is None:
+                    raise DashboardError(f"経路が見つかりません: {record_id}")
+                cancelled = self.app.store.delete(record_id)
+                self.app.terraform.invalidate_plan()
+                action = "route-create-cancel" if cancelled else "route-delete-pending"
+                self.app.audit.append(action, "success", str(record["name"]))
+                self.send_json({"routes": self.app.store.views()})
+                return
+            if path.startswith(history_prefix):
+                record_id = unquote(path[len(history_prefix) :])
+                record = next(
+                    (
+                        item
+                        for item in self.app.store.views()
+                        if item["id"] == record_id
+                    ),
+                    None,
+                )
+                if record is None:
+                    raise DashboardError(f"経路が見つかりません: {record_id}")
+                self.app.store.purge_deleted(record_id)
+                self.app.audit.append("route-history-purge", "success", str(record["name"]))
+                self.send_json({"routes": self.app.store.views()})
+                return
+            self.send_error_json(HTTPStatus.NOT_FOUND, "APIが見つかりません。")
         except DashboardError as exc:
             self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc), command_output(exc))
+        finally:
+            self.app.operation_lock.release()
 
     def create_plan(self) -> None:
         if not self.app.operation_lock.acquire(blocking=False):
             self.send_error_json(HTTPStatus.CONFLICT, "別の操作を実行中です。")
             return
         try:
+            if self.app.store.has_pending_relay():
+                raise ConflictError(
+                    "Terraform適用後のリレー同期待ちです。先に「リレーだけ再同期」を実行してください。"
+                )
             routes = self.app.store.list()
             actual = self.app.relay.list()
             conflicts = self.app.relay.check_conflicts(routes, actual)
@@ -249,8 +310,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             routes = self.app.store.list()
             terraform_output = self.app.terraform.apply(routes)
+            self.app.store.mark_terraform_applied()
             try:
-                relay_actions = self.app.relay.sync(routes)
+                relay_actions = self.app.relay.sync(self.app.store.relay_sync_routes())
             except DashboardError as exc:
                 self.app.terraform.invalidate_plan()
                 self.app.audit.append(
@@ -264,7 +326,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "partial": True,
                         "message": (
                             "Terraformは適用されましたが、OCIリレー同期に失敗しました。"
-                            "接続を直した後に「リレーだけ同期」を実行してください。"
+                            "接続を直した後に「リレーだけ再同期」を実行してください。"
                         ),
                         "terraform_output": terraform_output,
                         "relay_output": command_output(exc),
@@ -273,6 +335,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            self.app.store.commit_relay_sync()
             self.app.terraform.invalidate_plan()
             self.app.audit.append("apply", "success", " / ".join(relay_actions))
             self.send_json(
@@ -300,8 +363,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.CONFLICT, "別の操作を実行中です。")
             return
         try:
-            routes = self.app.store.list()
-            actions = self.app.relay.sync(routes)
+            recovering = self.app.store.has_pending_relay()
+            actions = self.app.relay.sync(self.app.store.relay_sync_routes())
+            if recovering:
+                self.app.store.commit_relay_sync()
             self.app.audit.append("relay-sync", "success", " / ".join(actions))
             self.send_json({"ok": True, "actions": actions})
         except DashboardError as exc:
@@ -309,6 +374,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.BAD_GATEWAY, str(exc), command_output(exc))
         finally:
             self.app.operation_lock.release()
+
+    def acquire_operation(self) -> bool:
+        if self.app.operation_lock.acquire(blocking=False):
+            return True
+        self.send_error_json(HTTPStatus.CONFLICT, "別の操作を実行中です。")
+        return False
 
     def authenticate(self) -> bool:
         header = self.headers.get("Authorization", "")

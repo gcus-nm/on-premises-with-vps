@@ -393,6 +393,51 @@ h2 {
   overflow-x: auto;
 }
 
+.route-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 14px 24px 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.route-tab {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 13px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.route-tab span {
+  display: inline-grid;
+  min-width: 21px;
+  height: 21px;
+  padding: 0 5px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+}
+
+.route-tab.active {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+}
+
+.route-tab.active span {
+  border-color: rgb(133 240 180 / 45%);
+  color: var(--accent);
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -459,6 +504,51 @@ td.description-cell {
   color: var(--warning);
 }
 
+.state-badge {
+  display: inline-flex;
+  min-height: 25px;
+  align-items: center;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.state-badge.applied {
+  border-color: rgb(133 240 180 / 35%);
+  background: rgb(133 240 180 / 7%);
+  color: var(--accent);
+}
+
+.state-badge.pending_create,
+.state-badge.pending_update,
+.state-badge.pending_delete {
+  border-color: rgb(255 200 107 / 35%);
+  background: rgb(255 200 107 / 7%);
+  color: var(--warning);
+}
+
+.state-badge.pending_relay {
+  border-color: rgb(255 122 134 / 38%);
+  background: rgb(255 122 134 / 7%);
+  color: var(--danger);
+}
+
+.state-badge.deleted {
+  color: #718b82;
+}
+
+.route-row.state-pending_delete,
+.route-row.state-deleted {
+  background: rgb(0 0 0 / 9%);
+}
+
+.route-row.state-deleted td:not(:last-child) {
+  opacity: 0.62;
+}
+
 .mono {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 12px;
@@ -484,9 +574,23 @@ td.description-cell {
   color: var(--text);
 }
 
+.small-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.small-button.restore:hover {
+  border-color: rgb(133 240 180 / 38%);
+  color: var(--accent);
+}
+
 .small-button.delete:hover {
   border-color: rgb(255 122 134 / 38%);
   color: var(--danger);
+}
+
+.row-lock-note {
+  white-space: nowrap;
 }
 
 .side-stack {
@@ -945,6 +1049,11 @@ code {
   .routes-panel .panel-heading {
     padding-right: 18px;
     padding-left: 18px;
+  }
+
+  .route-tabs {
+    padding-right: 14px;
+    padding-left: 14px;
   }
 
   .plan-summary {

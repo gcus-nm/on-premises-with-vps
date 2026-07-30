@@ -54,6 +54,21 @@ class RouteDialogMarkupTests(unittest.TestCase):
 
         self.assertIn("[hidden] {\n  display: none !important;\n}", styles)
 
+    def test_route_state_tabs_and_actions_are_present(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        html = (project_root / "relay-dashboard/static/index.html").read_text(
+            encoding="utf-8"
+        )
+        javascript = (project_root / "relay-dashboard/static/app.js").read_text(
+            encoding="utf-8"
+        )
+
+        for route_filter in ("all", "applied", "pending", "deleted"):
+            self.assertIn(f'data-route-filter="{route_filter}"', html)
+        self.assertIn("data-cancel-delete", javascript)
+        self.assertIn("data-purge-route", javascript)
+        self.assertIn('pending_relay: "リレー同期待ち"', javascript)
+
 
 if __name__ == "__main__":
     unittest.main()

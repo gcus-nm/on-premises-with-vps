@@ -5,6 +5,18 @@ const appState = {
   plan: null,
   audit: [],
   csrfToken: "",
+  routeFilter: "all",
+  pendingRelay: false,
+  busy: false,
+};
+
+const routeStateLabels = {
+  applied: "反映済み",
+  pending_create: "作成待ち",
+  pending_update: "更新待ち",
+  pending_delete: "削除待ち",
+  pending_relay: "リレー同期待ち",
+  deleted: "削除済み",
 };
 
 const elements = {
@@ -14,13 +26,17 @@ const elements = {
   status: document.querySelector("#metric-status"),
   statusDetail: document.querySelector("#metric-status-detail"),
   empty: document.querySelector("#empty-state"),
+  emptyTitle: document.querySelector("#empty-title"),
+  emptyDescription: document.querySelector("#empty-description"),
+  emptyNewRoute: document.querySelector("#empty-new-route-button"),
+  routeTabs: document.querySelector("#route-tabs"),
   tableWrap: document.querySelector("#routes-table-wrap"),
   routesBody: document.querySelector("#routes-body"),
   auditList: document.querySelector("#audit-list"),
   routeDialog: document.querySelector("#route-dialog"),
   routeForm: document.querySelector("#route-form"),
   routeDialogTitle: document.querySelector("#route-dialog-title"),
-  originalName: document.querySelector("#original-name"),
+  recordId: document.querySelector("#record-id"),
   routeName: document.querySelector("#route-name"),
   routeProtocol: document.querySelector("#route-protocol"),
   routePublicPort: document.querySelector("#route-public-port"),
@@ -69,41 +85,85 @@ async function loadState() {
   appState.plan = payload.plan;
   appState.audit = payload.audit || [];
   appState.csrfToken = payload.csrf_token;
+  appState.pendingRelay = Boolean(payload.pending_relay);
+  appState.busy = Boolean(payload.busy);
   render();
 }
 
 function render() {
-  elements.total.textContent = String(appState.routes.length);
+  const managed = appState.routes.filter((route) => route.state !== "deleted");
+  elements.total.textContent = String(managed.length);
   elements.tcp.textContent = String(
-    appState.routes.filter((route) => route.protocol === "tcp").length,
+    managed.filter((route) => route.protocol === "tcp").length,
   );
   elements.udp.textContent = String(
-    appState.routes.filter((route) => route.protocol === "udp").length,
+    managed.filter((route) => route.protocol === "udp").length,
   );
   renderRoutes();
   renderAudit();
   renderPlanStatus();
+  renderOperationAvailability();
 }
 
 function renderRoutes() {
-  const hasRoutes = appState.routes.length > 0;
+  const counts = {
+    all: appState.routes.length,
+    applied: appState.routes.filter((route) => route.state_group === "applied").length,
+    pending: appState.routes.filter((route) => route.state_group === "pending").length,
+    deleted: appState.routes.filter((route) => route.state_group === "deleted").length,
+  };
+  for (const tab of elements.routeTabs.querySelectorAll("[data-route-filter]")) {
+    const selected = tab.dataset.routeFilter === appState.routeFilter;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", selected ? "true" : "false");
+  }
+  for (const counter of elements.routeTabs.querySelectorAll("[data-filter-count]")) {
+    counter.textContent = String(counts[counter.dataset.filterCount] || 0);
+  }
+
+  const visibleRoutes = appState.routes.filter(
+    (route) =>
+      appState.routeFilter === "all" || route.state_group === appState.routeFilter,
+  );
+  const hasRoutes = visibleRoutes.length > 0;
   elements.empty.hidden = hasRoutes;
   elements.tableWrap.hidden = !hasRoutes;
   elements.routesBody.replaceChildren();
 
-  for (const route of appState.routes) {
+  const emptyCopy = {
+    all: ["経路はまだ登録されていません", "最初の公開ポートとMiniPCの転送先を追加してください。"],
+    applied: ["反映済みの経路はありません", "Applyが完了した経路がここに表示されます。"],
+    pending: ["未反映の経路はありません", "作成・更新・削除待ちの経路はありません。"],
+    deleted: ["削除済みの経路はありません", "正常に削除された経路の履歴がここに残ります。"],
+  };
+  [elements.emptyTitle.textContent, elements.emptyDescription.textContent] =
+    emptyCopy[appState.routeFilter];
+  elements.emptyNewRoute.hidden = appState.routeFilter !== "all";
+
+  for (const route of visibleRoutes) {
     const row = document.createElement("tr");
+    row.className = `route-row state-${route.state}`;
+    const locked = appState.pendingRelay || appState.busy;
+    let actions = `
+      <button class="small-button edit" type="button" data-route="${escapeAttribute(route.id)}" ${locked ? "disabled" : ""}>編集</button>
+      <button class="small-button delete" type="button" data-delete-route="${escapeAttribute(route.id)}" ${locked ? "disabled" : ""}>削除</button>
+    `;
+    if (route.state === "pending_delete") {
+      actions = `<button class="small-button restore" type="button" data-cancel-delete="${escapeAttribute(route.id)}" ${locked ? "disabled" : ""}>削除を取り消す</button>`;
+    } else if (route.state === "deleted") {
+      actions = `<button class="small-button delete" type="button" data-purge-route="${escapeAttribute(route.id)}" ${locked ? "disabled" : ""}>履歴から消去</button>`;
+    } else if (route.state === "pending_relay") {
+      actions = '<span class="muted row-lock-note">再同期してください</span>';
+    }
     row.innerHTML = `
       <td><span class="route-name">${escapeHtml(route.name)}</span></td>
       <td><span class="protocol-badge ${route.protocol}">${route.protocol.toUpperCase()}</span></td>
       <td><span class="mono">${route.public_port}</span></td>
       <td><span class="mono">${escapeHtml(route.target_address)}:${route.target_port}</span></td>
       <td class="description-cell">${escapeHtml(route.description || "—")}</td>
+      <td><span class="state-badge ${escapeAttribute(route.state)}">${escapeHtml(routeStateLabels[route.state] || route.state)}</span></td>
       <td>
-        <div class="row-actions">
-          <button class="small-button edit" type="button" data-route="${escapeAttribute(route.name)}">編集</button>
-          <button class="small-button delete" type="button" data-delete-route="${escapeAttribute(route.name)}">削除</button>
-        </div>
+        <div class="row-actions">${actions}</div>
       </td>
     `;
     elements.routesBody.append(row);
@@ -132,8 +192,19 @@ function renderAudit() {
 }
 
 function renderPlanStatus() {
+  const pendingCount = appState.routes.filter(
+    (route) => route.state_group === "pending",
+  ).length;
+  if (appState.pendingRelay) {
+    setMetricStatus("再同期待ち", "Terraform反映済み・OCIリレー未同期", "danger");
+    return;
+  }
   if (!appState.plan) {
-    setMetricStatus("未計画", "変更を確認するとplanを作成します", "warning");
+    if (pendingCount > 0) {
+      setMetricStatus(`未反映 ${pendingCount}件`, "変更を確認してApplyしてください", "warning");
+    } else {
+      setMetricStatus("反映済み", "未反映の変更はありません", "ready");
+    }
     return;
   }
   if (!appState.plan.safe) {
@@ -143,6 +214,14 @@ function renderPlanStatus() {
   setMetricStatus("確認待ち", "安全なplanが作成されています", "info");
 }
 
+function renderOperationAvailability() {
+  const locked = appState.pendingRelay || appState.busy;
+  document.querySelector("#new-route-button").disabled = locked;
+  elements.emptyNewRoute.disabled = locked;
+  document.querySelector("#plan-button").disabled = locked;
+  document.querySelector("#sync-button").disabled = appState.busy;
+}
+
 function setMetricStatus(label, detail, tone) {
   elements.status.textContent = label;
   elements.statusDetail.textContent = detail;
@@ -150,8 +229,9 @@ function setMetricStatus(label, detail, tone) {
 }
 
 function openNewRoute() {
+  if (appState.pendingRelay || appState.busy) return;
   elements.routeForm.reset();
-  elements.originalName.value = "";
+  elements.recordId.value = "";
   elements.routeTargetAddress.value = "10.99.0.2";
   elements.routeDialogTitle.textContent = "経路を追加";
   elements.routeFormError.textContent = "";
@@ -159,10 +239,11 @@ function openNewRoute() {
   elements.routeName.focus();
 }
 
-function openEditRoute(name) {
-  const route = appState.routes.find((item) => item.name === name);
+function openEditRoute(id) {
+  if (appState.pendingRelay || appState.busy) return;
+  const route = appState.routes.find((item) => item.id === id);
   if (!route) return;
-  elements.originalName.value = route.name;
+  elements.recordId.value = route.id;
   elements.routeName.value = route.name;
   elements.routeProtocol.value = route.protocol;
   elements.routePublicPort.value = route.public_port;
@@ -178,7 +259,7 @@ function openEditRoute(name) {
 async function saveRoute() {
   elements.routeFormError.textContent = "";
   if (!elements.routeForm.reportValidity()) return;
-  const originalName = elements.originalName.value;
+  const recordId = elements.recordId.value;
   const body = {
     name: elements.routeName.value,
     protocol: elements.routeProtocol.value,
@@ -189,8 +270,8 @@ async function saveRoute() {
   };
   setButtonBusy(document.querySelector("#save-route-button"), true, "保存中…");
   try {
-    if (originalName) {
-      await api(`/api/routes/${encodeURIComponent(originalName)}`, {
+    if (recordId) {
+      await api(`/api/routes/${encodeURIComponent(recordId)}`, {
         method: "PUT",
         body,
       });
@@ -207,14 +288,48 @@ async function saveRoute() {
   }
 }
 
-async function deleteRoute(name) {
-  if (!window.confirm(`経路「${name}」を削除しますか？\n次回applyまではOCIへ反映されません。`)) {
+async function deleteRoute(id) {
+  const route = appState.routes.find((item) => item.id === id);
+  if (!route) return;
+  const message =
+    route.state === "pending_create"
+      ? `未反映の経路「${route.name}」の作成を取り消しますか？`
+      : `経路「${route.name}」を削除待ちにしますか？\n次回ApplyまではOCIから削除されません。`;
+  if (!window.confirm(message)) {
     return;
   }
   try {
-    await api(`/api/routes/${encodeURIComponent(name)}`, { method: "DELETE" });
+    await api(`/api/routes/${encodeURIComponent(id)}`, { method: "DELETE" });
     await loadState();
-    toast("経路を削除しました。");
+    toast(route.state === "pending_create" ? "経路の作成を取り消しました。" : "経路を削除待ちにしました。");
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  }
+}
+
+async function cancelDelete(id) {
+  try {
+    await api(`/api/routes/${encodeURIComponent(id)}/cancel-delete`, {
+      method: "POST",
+    });
+    await loadState();
+    toast("経路の削除を取り消しました。");
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  }
+}
+
+async function purgeDeleted(id) {
+  const route = appState.routes.find((item) => item.id === id);
+  if (!route || !window.confirm(`削除済み経路「${route.name}」を履歴から完全に消去しますか？`)) {
+    return;
+  }
+  try {
+    await api(`/api/deleted-routes/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    await loadState();
+    toast("削除済み履歴を消去しました。");
   } catch (error) {
     toast(firstLine(error.message), true);
   }
@@ -362,7 +477,9 @@ async function showRelayStatus() {
 
 async function syncRelay() {
   const confirmation = window.prompt(
-    "Terraformは変更せず、現在のGUI経路をOCIリレーへ同期します。\n続行する場合は SYNC と入力してください。",
+    appState.pendingRelay
+      ? "Terraformへ反映済みの経路をOCIリレーへ再同期します。\n続行する場合は SYNC と入力してください。"
+      : "Terraformは変更せず、最後に反映済みの経路をOCIリレーへ再同期します。\n未反映の変更は同期されません。\n続行する場合は SYNC と入力してください。",
   );
   if (confirmation !== "SYNC") return;
   const button = document.querySelector("#sync-button");
@@ -432,8 +549,19 @@ document.querySelector("#close-info-button").addEventListener("click", () => ele
 elements.routesBody.addEventListener("click", (event) => {
   const edit = event.target.closest("[data-route]");
   const remove = event.target.closest("[data-delete-route]");
+  const cancelDeleteButton = event.target.closest("[data-cancel-delete]");
+  const purge = event.target.closest("[data-purge-route]");
   if (edit) openEditRoute(edit.dataset.route);
   if (remove) deleteRoute(remove.dataset.deleteRoute);
+  if (cancelDeleteButton) cancelDelete(cancelDeleteButton.dataset.cancelDelete);
+  if (purge) purgeDeleted(purge.dataset.purgeRoute);
+});
+
+elements.routeTabs.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-route-filter]");
+  if (!tab) return;
+  appState.routeFilter = tab.dataset.routeFilter;
+  renderRoutes();
 });
 
 elements.applyConfirmation.addEventListener("input", () => {
