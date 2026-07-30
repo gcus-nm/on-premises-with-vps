@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -189,6 +191,56 @@ class RelayParsingTests(unittest.TestCase):
         conflicts = manager.check_conflicts([route()], actual)
         self.assertEqual(len(conflicts), 1)
         self.assertIn("manual-minecraft", conflicts[0])
+
+
+class RelayScriptTests(unittest.TestCase):
+    def test_uses_runtime_home_ssh_config(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            binary_directory = temporary / "bin"
+            ssh_directory = temporary / ".ssh"
+            binary_directory.mkdir()
+            ssh_directory.mkdir()
+            ssh_config = ssh_directory / "config"
+            ssh_config.write_text("Host oci-relay\n", encoding="utf-8")
+            capture = temporary / "ssh-arguments"
+            fake_ssh = binary_directory / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                'printf "%s\\n" "$@" >"$WG_RELAY_TEST_CAPTURE"\n'
+                "printf 'NAME\\tPROTOCOL\\tPUBLIC_PORT\\tTARGET\\n'\n",
+                encoding="utf-8",
+            )
+            fake_ssh.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOME": str(temporary),
+                    "PATH": f"{binary_directory}:{environment['PATH']}",
+                    "WG_RELAY_TEST_CAPTURE": str(capture),
+                }
+            )
+            environment.pop("WG_RELAY_SSH_CONFIG", None)
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(project_root / "scripts/wg-relay.sh"),
+                    "forward",
+                    "list",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                capture.read_text(encoding="utf-8").splitlines()[:3],
+                ["-F", str(ssh_config), "oci-relay"],
+            )
 
 
 class TerraformPlanAnalysisTests(unittest.TestCase):
