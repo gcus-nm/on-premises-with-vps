@@ -11,7 +11,8 @@ COPY dashboard/ /app/dashboard/
 COPY static/ /app/static/
 COPY entrypoint.sh /app/entrypoint.sh
 
-RUN chmod 0755 /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh \
+    && chmod 0755 /app/entrypoint.sh
 RUN mkdir -p /workspace/scripts /data
 
 ENV DASHBOARD_BIND=0.0.0.0 \

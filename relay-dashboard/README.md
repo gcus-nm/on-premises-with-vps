@@ -143,6 +143,14 @@ http://127.0.0.1:41800
 
 ユーザー名とパスワードは`relay-dashboard/.env`で確認できます。
 
+`[FATAL tini] exec /app/entrypoint.sh failed: No such file or directory`が表示された場合は、
+古いイメージを使わないよう、次のコマンドで再ビルド・再作成します。
+
+```powershell
+docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml build --no-cache
+docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml up -d --force-recreate
+```
+
 ## 5. 最初の経路を作成する
 
 Minecraft共通入口の場合:
