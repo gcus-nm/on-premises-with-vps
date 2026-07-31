@@ -9,6 +9,10 @@ const appState = {
   audit: [],
   csrfToken: "",
   routeFilter: "all",
+  webRoutes: [],
+  webRoutesStatus: {},
+  webGateway: { ports: { "80": {}, "443": {} } },
+  webRouteFilter: "all",
   pendingRelay: false,
   busy: false,
   collapsedGroups: loadCollapsedGroups(),
@@ -31,6 +35,7 @@ const routeStateLabels = {
   pending_disable: "無効化待ち",
   pending_delete: "削除待ち",
   pending_relay: "リレー同期待ち",
+  publishing: "反映途中",
   deleted: "削除済み",
 };
 
@@ -48,6 +53,37 @@ const elements = {
   tableWrap: document.querySelector("#routes-table-wrap"),
   routesBody: document.querySelector("#routes-body"),
   auditList: document.querySelector("#audit-list"),
+  webGateway80: document.querySelector("#web-gateway-80"),
+  webGateway443: document.querySelector("#web-gateway-443"),
+  webRouteSummary: document.querySelector("#web-route-summary"),
+  webRouteTabs: document.querySelector("#web-route-tabs"),
+  webRoutesBody: document.querySelector("#web-routes-body"),
+  webRouteDialog: document.querySelector("#web-route-dialog"),
+  webRouteForm: document.querySelector("#web-route-form"),
+  webRouteDialogTitle: document.querySelector("#web-route-dialog-title"),
+  webRecordId: document.querySelector("#web-record-id"),
+  webRouteName: document.querySelector("#web-route-name"),
+  webRouteHostname: document.querySelector("#web-route-hostname"),
+  webRouteAlias: document.querySelector("#web-route-alias"),
+  webRoutePort: document.querySelector("#web-route-port"),
+  webRouteDescription: document.querySelector("#web-route-description"),
+  webRouteBasicAuthEnabled: document.querySelector("#web-route-basic-auth-enabled"),
+  webRouteBasicAuthFields: document.querySelector("#web-route-basic-auth-fields"),
+  webRouteBasicAuthUsername: document.querySelector("#web-route-basic-auth-username"),
+  webRouteBasicAuthRotate: document.querySelector("#web-route-basic-auth-rotate"),
+  webRouteBasicAuthRotateLabel: document.querySelector("#web-route-basic-auth-rotate-label"),
+  webRouteAdvanced: document.querySelector("#web-route-advanced"),
+  webRouteAdvancedDescription: document.querySelector("#web-route-advanced-description"),
+  deleteWebRouteButton: document.querySelector("#delete-web-route-button"),
+  saveWebRouteButton: document.querySelector("#save-web-route-button"),
+  webRouteFormError: document.querySelector("#web-route-form-error"),
+  webPublishDialog: document.querySelector("#web-publish-dialog"),
+  webPublishSummary: document.querySelector("#web-publish-summary"),
+  webPublishRoutes: document.querySelector("#web-publish-routes"),
+  webPublishConfig: document.querySelector("#web-publish-config"),
+  webPublishConfirmation: document.querySelector("#web-publish-confirmation"),
+  webPublishConfirmButton: document.querySelector("#web-publish-confirm-button"),
+  webPublishError: document.querySelector("#web-publish-error"),
   routeDialog: document.querySelector("#route-dialog"),
   routeForm: document.querySelector("#route-form"),
   routeDialogTitle: document.querySelector("#route-dialog-title"),
@@ -169,6 +205,9 @@ async function loadState() {
   const payload = await api("/api/state");
   appState.routes = payload.routes || [];
   appState.groups = payload.groups || [];
+  appState.webRoutes = payload.web_routes || [];
+  appState.webRoutesStatus = payload.web_routes_status || {};
+  appState.webGateway = payload.web_gateway || appState.webGateway;
   pruneCollapsedGroups();
   appState.plan = payload.plan;
   appState.audit = payload.audit || [];
@@ -211,6 +250,7 @@ function render() {
     enabled.filter((route) => route.protocol === "udp").length,
   );
   renderRoutes();
+  renderWebRoutes();
   renderAudit();
   renderPlanStatus();
   renderOperationAvailability();
@@ -381,6 +421,95 @@ function renderRoutes() {
       `,
     );
   }
+}
+
+function renderWebRoutes() {
+  const counts = {
+    all: appState.webRoutes.length,
+    enabled: appState.webRoutes.filter((route) => route.state_group === "enabled").length,
+    disabled: appState.webRoutes.filter((route) => route.state_group === "disabled").length,
+    pending: appState.webRoutes.filter((route) => route.state_group === "pending").length,
+    deleted: appState.webRoutes.filter((route) => route.state_group === "deleted").length,
+  };
+  for (const tab of elements.webRouteTabs.querySelectorAll("[data-web-route-filter]")) {
+    const selected = tab.dataset.webRouteFilter === appState.webRouteFilter;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", String(selected));
+  }
+  for (const counter of elements.webRouteTabs.querySelectorAll("[data-web-filter-count]")) {
+    counter.textContent = String(counts[counter.dataset.webFilterCount] || 0);
+  }
+
+  const ports = appState.webGateway.ports || {};
+  setGatewayPortStatus(elements.webGateway80, ports["80"]);
+  setGatewayPortStatus(elements.webGateway443, ports["443"]);
+  elements.webRouteSummary.textContent =
+    `${appState.webRoutesStatus.total || 0}件・未反映${appState.webRoutesStatus.pending || 0}件`;
+
+  const recovery = Boolean(appState.webRoutesStatus.publish_recovery_required);
+  const locked = appState.busy || recovery;
+  document.querySelector("#new-web-route-button").disabled = locked;
+  document.querySelector("#web-gateway-setup-button").disabled =
+    appState.busy || Boolean(appState.webGateway.staged);
+  const previewButton = document.querySelector("#web-preview-button");
+  previewButton.disabled =
+    appState.busy || (!recovery && counts.pending === 0);
+  previewButton.textContent = recovery
+    ? "Webルートを再反映"
+    : "反映内容を確認";
+
+  const visible = appState.webRoutes.filter(
+    (route) =>
+      appState.webRouteFilter === "all" ||
+      route.state_group === appState.webRouteFilter,
+  );
+  elements.webRoutesBody.innerHTML = visible.length
+    ? visible.map((route) => renderWebRouteItem(route, locked)).join("")
+    : `<p class="muted">${
+        appState.webRouteFilter === "all"
+          ? "Webルートはまだ登録されていません。"
+          : "この状態のWebルートはありません。"
+      }</p>`;
+}
+
+function setGatewayPortStatus(element, status = {}) {
+  element.textContent = status.label || "未登録";
+  element.className = `gateway-${status.state || "missing"}`;
+  element.title = status.target ? `現在の転送先: ${status.target}` : "";
+}
+
+function renderWebRouteItem(route, locked) {
+  let controls = "";
+  if (route.state === "pending_delete" || route.state === "deleted") {
+    controls = `<button class="small-button edit" type="button" data-web-route-edit="${escapeAttribute(route.id)}" ${locked ? "disabled" : ""}>高度な操作</button>`;
+  } else {
+    controls = `
+      <button
+        class="toggle-button"
+        type="button"
+        role="switch"
+        aria-checked="${String(route.desired_enabled)}"
+        aria-label="${escapeAttribute(`${route.name}を${route.desired_enabled ? "無効" : "有効"}にする`)}"
+        data-web-route-toggle="${escapeAttribute(route.id)}"
+        data-state="${route.desired_enabled ? "enabled" : "disabled"}"
+        ${locked ? "disabled" : ""}
+      ></button>
+      <button class="small-button edit" type="button" data-web-route-edit="${escapeAttribute(route.id)}" ${locked ? "disabled" : ""}>編集</button>
+    `;
+  }
+  return `
+    <div class="web-route-item state-${escapeAttribute(route.state)}">
+      <div class="route-main">
+        <span class="route-name">${escapeHtml(route.name)}</span>
+        <small>${escapeHtml(route.description || "説明なし")}${route.basic_auth_enabled ? "・Basic認証" : ""}</small>
+      </div>
+      <span class="web-hostname">${escapeHtml(route.hostname)}</span>
+      <span class="web-route-arrow">→</span>
+      <span class="mono">${escapeHtml(route.docker_alias)}:${route.container_port}</span>
+      <span class="state-badge ${escapeAttribute(route.state)}">${escapeHtml(routeStateLabels[route.state] || route.state)}</span>
+      <div class="route-controls">${controls}</div>
+    </div>
+  `;
 }
 
 function renderGroupTree(group, visibleRoutes, depth = 0) {
@@ -827,6 +956,272 @@ async function deleteRoute(id = elements.recordId.value) {
     toast(route.state === "pending_create" ? "経路の作成を取り消しました。" : "経路を削除待ちにしました。");
   } catch (error) {
     elements.routeFormError.textContent = firstLine(error.message);
+  }
+}
+
+function openNewWebRoute() {
+  if (appState.busy || appState.webRoutesStatus.publish_recovery_required) return;
+  elements.webRouteForm.reset();
+  elements.webRecordId.value = "";
+  elements.webRouteDialogTitle.textContent = "Webルートを追加";
+  elements.webRouteAdvanced.hidden = true;
+  elements.webRouteAdvanced.removeAttribute("open");
+  elements.webRouteBasicAuthUsername.value = "";
+  elements.webRouteBasicAuthRotate.checked = false;
+  syncWebRouteBasicAuthFields();
+  elements.webRouteFormError.textContent = "";
+  setWebRouteEditorReadonly(false);
+  elements.webRouteDialog.showModal();
+  elements.webRouteName.focus();
+}
+
+function openEditWebRoute(id) {
+  if (appState.busy || appState.webRoutesStatus.publish_recovery_required) return;
+  const route = appState.webRoutes.find((item) => item.id === id);
+  if (!route) return;
+  const readonly = route.state === "deleted" || route.state === "pending_delete";
+  elements.webRecordId.value = route.id;
+  elements.webRouteName.value = route.name;
+  elements.webRouteHostname.value = route.hostname;
+  elements.webRouteAlias.value = route.docker_alias;
+  elements.webRoutePort.value = route.container_port;
+  elements.webRouteDescription.value = route.description || "";
+  elements.webRouteBasicAuthEnabled.checked = Boolean(route.basic_auth_enabled);
+  elements.webRouteBasicAuthUsername.value = route.basic_auth_username || route.name;
+  elements.webRouteBasicAuthRotate.checked = false;
+  syncWebRouteBasicAuthFields();
+  setWebRouteEditorReadonly(readonly);
+  elements.webRouteDialogTitle.textContent = readonly
+    ? "Webルートの高度な操作"
+    : "Webルートを編集";
+  elements.webRouteAdvanced.hidden = false;
+  elements.webRouteAdvanced.toggleAttribute("open", readonly);
+  if (route.state === "pending_create") {
+    elements.webRouteAdvancedDescription.textContent =
+      "まだ反映していないWebルートの作成を取り消します。";
+    elements.deleteWebRouteButton.textContent = "未反映の作成を取り消す";
+  } else if (route.state === "pending_delete") {
+    elements.webRouteAdvancedDescription.textContent =
+      "Traefikへまだ反映していない削除待ち状態を取り消します。";
+    elements.deleteWebRouteButton.textContent = "削除待ちを取り消す";
+  } else if (route.state === "deleted") {
+    elements.webRouteAdvancedDescription.textContent =
+      "Traefikから削除済みのWebルート履歴を完全に消去します。";
+    elements.deleteWebRouteButton.textContent = "削除履歴を消去";
+  } else {
+    elements.webRouteAdvancedDescription.textContent =
+      "Webルートを削除する場合だけ使用してください。通常は一覧のトグルで無効化します。";
+    elements.deleteWebRouteButton.textContent = "このWebルートを削除待ちにする";
+  }
+  elements.webRouteFormError.textContent = "";
+  elements.webRouteDialog.showModal();
+  if (readonly) elements.deleteWebRouteButton.focus();
+  else elements.webRouteName.focus();
+}
+
+function setWebRouteEditorReadonly(readonly) {
+  for (const field of [
+    elements.webRouteName,
+    elements.webRouteHostname,
+    elements.webRouteAlias,
+    elements.webRoutePort,
+    elements.webRouteDescription,
+    elements.webRouteBasicAuthEnabled,
+    elements.webRouteBasicAuthUsername,
+    elements.webRouteBasicAuthRotate,
+  ]) {
+    field.disabled = readonly;
+  }
+  elements.saveWebRouteButton.hidden = readonly;
+}
+
+function syncWebRouteBasicAuthFields() {
+  const enabled = elements.webRouteBasicAuthEnabled.checked;
+  const editing = Boolean(elements.webRecordId.value);
+  elements.webRouteBasicAuthFields.hidden = !enabled;
+  elements.webRouteBasicAuthUsername.required = enabled;
+  elements.webRouteBasicAuthRotateLabel.hidden = !enabled || !editing;
+  if (!enabled) elements.webRouteBasicAuthRotate.checked = false;
+  if (enabled && !elements.webRouteBasicAuthUsername.value) {
+    elements.webRouteBasicAuthUsername.value = elements.webRouteName.value || "reader";
+  }
+}
+
+async function saveWebRoute() {
+  elements.webRouteFormError.textContent = "";
+  if (!elements.webRouteForm.reportValidity()) return;
+  const recordId = elements.webRecordId.value;
+  const body = {
+    name: elements.webRouteName.value,
+    hostname: elements.webRouteHostname.value,
+    docker_alias: elements.webRouteAlias.value,
+    container_port: Number(elements.webRoutePort.value),
+    description: elements.webRouteDescription.value,
+    basic_auth_enabled: elements.webRouteBasicAuthEnabled.checked,
+    basic_auth_username: elements.webRouteBasicAuthUsername.value,
+    rotate_basic_auth: elements.webRouteBasicAuthRotate.checked,
+  };
+  setButtonBusy(elements.saveWebRouteButton, true, "保存中…");
+  try {
+    const response = await api(
+      recordId
+        ? `/api/web-routes/${encodeURIComponent(recordId)}`
+        : "/api/web-routes",
+      { method: recordId ? "PUT" : "POST", body },
+    );
+    elements.webRouteDialog.close();
+    await loadState();
+    if (response.one_time_basic_auth) {
+      const credentials = response.one_time_basic_auth;
+      window.prompt(
+        "Basic認証情報は今回だけ表示されます。安全な場所へ保存してください。",
+        `${credentials.username}:${credentials.password}`,
+      );
+    }
+    toast("Webルートを下書き保存しました。");
+  } catch (error) {
+    elements.webRouteFormError.textContent = firstLine(error.message);
+  } finally {
+    setButtonBusy(elements.saveWebRouteButton, false, "保存");
+  }
+}
+
+async function toggleWebRoute(id) {
+  const route = appState.webRoutes.find((item) => item.id === id);
+  if (!route) return;
+  try {
+    await api(`/api/web-routes/${encodeURIComponent(id)}/enabled`, {
+      method: "PUT",
+      body: { enabled: !route.desired_enabled },
+    });
+    await loadState();
+    toast(`${route.name}を${route.desired_enabled ? "無効" : "有効"}の下書きにしました。`);
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  }
+}
+
+async function deleteWebRoute(id = elements.webRecordId.value) {
+  const route = appState.webRoutes.find((item) => item.id === id);
+  if (!route) return;
+  try {
+    if (route.state === "pending_delete") {
+      await api(`/api/web-routes/${encodeURIComponent(id)}/cancel-delete`, {
+        method: "POST",
+      });
+      toast("Webルートの削除を取り消しました。");
+    } else if (route.state === "deleted") {
+      if (!window.confirm(`削除済みWebルート「${route.name}」の履歴を消去しますか？`)) {
+        return;
+      }
+      await api(`/api/deleted-web-routes/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      toast("Webルートの削除履歴を消去しました。");
+    } else {
+      const prompt = route.state === "pending_create"
+        ? `未反映のWebルート「${route.name}」の作成を取り消しますか？`
+        : `Webルート「${route.name}」を削除待ちにしますか？`;
+      if (!window.confirm(prompt)) return;
+      await api(`/api/web-routes/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      toast(route.state === "pending_create"
+        ? "Webルートの作成を取り消しました。"
+        : "Webルートを削除待ちにしました。");
+    }
+    elements.webRouteDialog.close();
+    await loadState();
+  } catch (error) {
+    elements.webRouteFormError.textContent = firstLine(error.message);
+  }
+}
+
+async function setupWebGateway() {
+  const button = document.querySelector("#web-gateway-setup-button");
+  setButtonBusy(button, true, "準備中…");
+  try {
+    await api("/api/web-gateway/setup", { method: "POST" });
+    await loadState();
+    toast("TCP/80・443を下書きしました。「変更を確認」からOCIへ適用してください。");
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  } finally {
+    setButtonBusy(button, false, "Web入口を準備");
+  }
+}
+
+async function reviewWebRoutes() {
+  if (appState.webRoutesStatus.publish_recovery_required) {
+    const confirmation = window.prompt(
+      "前回の反映が途中で停止しています。保存済みスナップショットを再反映する場合は PUBLISH と入力してください。",
+    );
+    if (confirmation !== "PUBLISH") return;
+    await publishWebRoutes(confirmation);
+    return;
+  }
+  const button = document.querySelector("#web-preview-button");
+  setButtonBusy(button, true, "確認中…");
+  try {
+    const payload = await api("/api/web-routes/preview", {
+      method: "POST",
+    });
+    const preview = payload.preview;
+    const labels = [
+      ["追加", preview.counts.create || 0],
+      ["更新", preview.counts.update || 0],
+      ["有効化", preview.counts.enable || 0],
+      ["無効化", preview.counts.disable || 0],
+      ["削除", preview.counts.delete || 0],
+    ];
+    elements.webPublishSummary.innerHTML = labels
+      .map(([label, count]) => `<div class="plan-count"><span>${label}</span><strong>${count}</strong></div>`)
+      .join("");
+    elements.webPublishRoutes.innerHTML = preview.routes.length
+      ? preview.routes
+          .map(
+            (route) => `
+              <div class="check-row">
+                <span class="check-icon ok">●</span>
+                <strong>${escapeHtml(route.hostname)}</strong>
+                <small>→ ${escapeHtml(route.target)}</small>
+              </div>
+            `,
+          )
+          .join("")
+      : '<p class="muted">有効なWebルートはありません。空の設定を反映します。</p>';
+    elements.webPublishConfig.textContent = preview.config;
+    elements.webPublishConfirmation.value = "";
+    elements.webPublishConfirmButton.disabled = true;
+    elements.webPublishError.textContent = "";
+    elements.webPublishDialog.showModal();
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  } finally {
+    setButtonBusy(button, false, "反映内容を確認");
+  }
+}
+
+async function publishWebRoutes(confirmation = elements.webPublishConfirmation.value) {
+  const button = elements.webPublishConfirmButton;
+  setButtonBusy(button, true, "反映中…");
+  try {
+    const payload = await api("/api/web-routes/publish", {
+      method: "POST",
+      body: { confirmation },
+    });
+    if (elements.webPublishDialog.open) elements.webPublishDialog.close();
+    await loadState();
+    toast(payload.message || "Webルートを反映しました。");
+  } catch (error) {
+    if (elements.webPublishDialog.open) {
+      elements.webPublishError.textContent = firstLine(error.message);
+    } else {
+      toast(firstLine(error.message), true);
+      await loadState().catch(() => {});
+    }
+  } finally {
+    setButtonBusy(button, false, "Traefikへ反映");
   }
 }
 
@@ -1497,6 +1892,16 @@ document.querySelector("#apply-button").addEventListener("click", applyPlan);
 document.querySelector("#preflight-button").addEventListener("click", showPreflight);
 document.querySelector("#relay-status-button").addEventListener("click", showRelayStatus);
 document.querySelector("#sync-button").addEventListener("click", syncRelay);
+document.querySelector("#new-web-route-button").addEventListener("click", openNewWebRoute);
+document.querySelector("#web-gateway-setup-button").addEventListener("click", setupWebGateway);
+document.querySelector("#web-preview-button").addEventListener("click", reviewWebRoutes);
+elements.saveWebRouteButton.addEventListener("click", saveWebRoute);
+elements.deleteWebRouteButton.addEventListener("click", () => deleteWebRoute());
+elements.webRouteBasicAuthEnabled.addEventListener("change", syncWebRouteBasicAuthFields);
+elements.webPublishConfirmButton.addEventListener("click", () => publishWebRoutes());
+document.querySelector("#close-web-publish-button").addEventListener("click", () => {
+  elements.webPublishDialog.close();
+});
 document.querySelector("#new-peer-button").addEventListener("click", openNewPeer);
 document.querySelector("#new-access-rule-button").addEventListener("click", () => {
   openNewAccessRule();
@@ -1527,6 +1932,20 @@ elements.routeTabs.addEventListener("click", (event) => {
   if (!tab) return;
   appState.routeFilter = tab.dataset.routeFilter;
   renderRoutes();
+});
+
+elements.webRoutesBody.addEventListener("click", (event) => {
+  const edit = event.target.closest("[data-web-route-edit]");
+  const toggle = event.target.closest("[data-web-route-toggle]");
+  if (edit) return openEditWebRoute(edit.dataset.webRouteEdit);
+  if (toggle) toggleWebRoute(toggle.dataset.webRouteToggle);
+});
+
+elements.webRouteTabs.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-web-route-filter]");
+  if (!tab) return;
+  appState.webRouteFilter = tab.dataset.webRouteFilter;
+  renderWebRoutes();
 });
 
 elements.groupMemberRows.addEventListener("click", (event) => {
@@ -1563,6 +1982,11 @@ elements.applyConfirmation.addEventListener("input", () => {
   elements.applyButton.disabled =
     elements.applyButton.dataset.safe !== "true" ||
     elements.applyConfirmation.value !== "APPLY";
+});
+
+elements.webPublishConfirmation.addEventListener("input", () => {
+  elements.webPublishConfirmButton.disabled =
+    elements.webPublishConfirmation.value !== "PUBLISH";
 });
 
 loadState()

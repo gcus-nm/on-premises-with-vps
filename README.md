@@ -36,7 +36,11 @@ OCIはインターネットからの通信受付とパケット転送だけを�
 
 Terraform適用直後の段階では、WireGuardの秘密鍵、Peer設定、DNSレコード、実際のポート転送ルールは作成しません。WireGuardの初期化とPeer管理には、設定ファイルを直接編集せずに操作できる管理スクリプトを使用します。詳しい手順は[WireGuard中継の管理](WIREGUARD.md)を参照してください。
 
-Windows Docker DesktopでTraefikとmc-routerを入口として使用し、OCIからTCP/UDPを転送する手順は[Docker入口とゲームポート転送](GATEWAY.md)を参照してください。Minecraftのホスト名マッピングは`scripts/mc-route.ps1`で追加・更新・削除でき、mc-routerが変更を自動的に再読み込みします。
+Windows Docker DesktopでTraefikとmc-routerを入口として使用し、OCIからTCP/UDPを転送する
+手順は[Docker入口とゲームポート転送](GATEWAY.md)を参照してください。Relay Controlから
+HTTPSの`ドメイン → Dockerサービス:ポート`も管理できます。Minecraftのホスト名
+マッピングは`scripts/mc-route.ps1`で追加・更新・削除でき、mc-routerが変更を自動的に
+再読み込みします。
 
 OCI公開ポートとWireGuard転送経路をブラウザから管理する場合は[OCI Relay Control](relay-dashboard/README.md)を使用できます。MiniPCのDocker Desktop上で動作し、安全性を検査したTerraform planを確認してから適用します。
 

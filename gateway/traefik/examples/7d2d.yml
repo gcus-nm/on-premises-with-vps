@@ -1,5 +1,5 @@
 # Example only. Move this file into ../dynamic after adding matching entryPoints
-# and published ports to gateway/compose.yaml and gateway/traefik/traefik.yml.
+# and published ports to gateway/compose.yaml.
 tcp:
   routers:
     seven-days-to-die:

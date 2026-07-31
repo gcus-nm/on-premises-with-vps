@@ -4,19 +4,40 @@ services:
   traefik:
     image: ${TRAEFIK_IMAGE:-traefik:v3.7.1}
     command:
-      - --configFile=/etc/traefik/traefik.yml
+      - --entryPoints.web.address=:80
+      - --entryPoints.web.http.redirections.entryPoint.to=websecure
+      - --entryPoints.web.http.redirections.entryPoint.scheme=https
+      - --entryPoints.web.http.redirections.entryPoint.permanent=true
+      - --entryPoints.websecure.address=:443
+      - --entryPoints.minecraft.address=:25565
+      - --entryPoints.health.address=:8082
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --api.dashboard=false
+      - --ping=true
+      - --ping.entryPoint=health
+      - --log.level=INFO
+      - --certificatesResolvers.letsencrypt.acme.email=${TRAEFIK_ACME_EMAIL:?TRAEFIK_ACME_EMAIL is required}
+      - --certificatesResolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web
+      - --certificatesResolvers.letsencrypt.acme.caServer=${TRAEFIK_ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}
     ports:
       - "${GATEWAY_BIND_IP:-0.0.0.0}:80:80/tcp"
       - "${GATEWAY_BIND_IP:-0.0.0.0}:443:443/tcp"
       - "${GATEWAY_BIND_IP:-0.0.0.0}:25565:25565/tcp"
     volumes:
-      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - traefik-certificates:/letsencrypt
     networks:
       - ingress
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      test:
+        - CMD
+        - traefik
+        - healthcheck
+        - --entryPoints.health.address=:8082
+        - --ping.entryPoint=health
       interval: 30s
       timeout: 5s
       retries: 3
@@ -38,3 +59,7 @@ services:
 networks:
   ingress:
     name: onprem-relay-ingress
+
+volumes:
+  traefik-certificates:
+    name: ${TRAEFIK_CERTIFICATES_VOLUME:-onprem-relay-traefik-certificates}

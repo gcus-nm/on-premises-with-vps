@@ -25,6 +25,9 @@ from dashboard.core import (
     RouteStore,
     TerraformManager,
     ValidationError,
+    WebRoute,
+    WebRouteStore,
+    hash_basic_auth_password,
     preflight_checks,
 )
 
@@ -71,6 +74,15 @@ class AppContext:
             relay_network=self.relay_network,
             relay_address=self.relay_address,
         )
+        self.web_store = WebRouteStore(
+            self.data_dir,
+            Path(
+                os.environ.get(
+                    "TRAEFIK_DYNAMIC_CONFIG",
+                    "/run/traefik-dynamic/ui-web-routes.yml",
+                )
+            ),
+        )
         self.audit = AuditLog(self.data_dir)
         self.relay = RelayManager(relay_script, relay_ssh_host)
         self.terraform = TerraformManager(self.workspace, self.data_dir)
@@ -86,6 +98,115 @@ class AppContext:
             relay_network=self.relay_network,
             relay_address=self.relay_address,
         )
+
+    @staticmethod
+    def web_route_from_payload(
+        payload: dict[str, object],
+        existing: WebRoute | None = None,
+    ) -> tuple[WebRoute, dict[str, str] | None]:
+        mapping = dict(payload)
+        enabled_value = payload.get(
+            "basic_auth_enabled",
+            existing.basic_auth_enabled if existing else False,
+        )
+        rotate_value = payload.get("rotate_basic_auth", False)
+        if not isinstance(enabled_value, bool):
+            raise ValidationError("Basic認証の有効状態はtrueまたはfalseで指定してください。")
+        if not isinstance(rotate_value, bool):
+            raise ValidationError("Basic認証の再生成状態はtrueまたはfalseで指定してください。")
+        mapping.pop("basic_auth_enabled", None)
+        mapping.pop("rotate_basic_auth", None)
+
+        one_time_credentials: dict[str, str] | None = None
+        if enabled_value:
+            username = str(
+                payload.get(
+                    "basic_auth_username",
+                    existing.basic_auth_username if existing else mapping.get("name", ""),
+                )
+            ).strip()
+            password_hash = (
+                existing.basic_auth_password_hash
+                if existing and existing.basic_auth_enabled
+                else ""
+            )
+            if (
+                not password_hash
+                or rotate_value
+                or (
+                    existing is not None
+                    and username != existing.basic_auth_username
+                )
+            ):
+                password = secrets.token_urlsafe(32)
+                password_hash = hash_basic_auth_password(password)
+                one_time_credentials = {
+                    "username": username,
+                    "password": password,
+                }
+            mapping["basic_auth_username"] = username
+            mapping["basic_auth_password_hash"] = password_hash
+        else:
+            mapping["basic_auth_username"] = ""
+            mapping["basic_auth_password_hash"] = ""
+        return WebRoute.from_mapping(mapping), one_time_credentials
+
+    def web_gateway_status(self) -> dict[str, object]:
+        ports: dict[str, dict[str, object]] = {}
+        views = self.store.views()
+        for port in (80, 443):
+            matching = next(
+                (
+                    route
+                    for route in views
+                    if (
+                        route["deleted_at"] is None
+                        and route["protocol"] == "tcp"
+                        and route["public_port"] == port
+                    )
+                ),
+                None,
+            )
+            if matching is None:
+                ports[str(port)] = {"state": "missing", "label": "未登録"}
+            elif (
+                matching["target_address"] != self.dashboard_target_address
+                or matching["target_port"] != port
+            ):
+                ports[str(port)] = {
+                    "state": "conflict",
+                    "label": "競合",
+                    "target": (
+                        f"{matching['target_address']}:{matching['target_port']}"
+                    ),
+                }
+            elif (
+                not matching["desired_enabled"]
+                or matching["state"] == "pending_delete"
+            ):
+                ports[str(port)] = {
+                    "state": "disabled",
+                    "label": (
+                        "削除待ち"
+                        if matching["state"] == "pending_delete"
+                        else "無効"
+                    ),
+                }
+            elif matching["state"] == "enabled":
+                ports[str(port)] = {"state": "ready", "label": "反映済み"}
+            else:
+                ports[str(port)] = {
+                    "state": "pending",
+                    "label": "Terraform未反映",
+                }
+        return {
+            "target": self.dashboard_target_address,
+            "ports": ports,
+            "ready": all(item["state"] == "ready" for item in ports.values()),
+            "staged": all(
+                item["state"] in {"ready", "pending"} for item in ports.values()
+            ),
+        }
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -108,6 +229,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {
                     "routes": self.app.store.views(),
                     "groups": self.app.store.group_views(),
+                    "web_routes": self.app.web_store.views(),
+                    "web_routes_status": self.app.web_store.status(),
+                    "web_gateway": self.app.web_gateway_status(),
                     "plan": self.app.terraform.load_plan_metadata(),
                     "audit": self.app.audit.recent(),
                     "busy": self.app.operation_lock.locked(),
@@ -122,7 +246,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.app.data_dir,
                 self.app.relay,
             )
+            web_config_ok, web_config_detail = (
+                self.app.web_store.config_target_status()
+            )
+            checks.append(
+                {
+                    "name": "Traefik動的設定",
+                    "ok": web_config_ok,
+                    "detail": web_config_detail,
+                }
+            )
             self.send_json({"checks": checks, "ok": all(check["ok"] for check in checks)})
+            return
+        if path == "/api/web-routes":
+            self.send_web_store_state()
+            return
+        if path.startswith("/api/web-routes/"):
+            record_id = unquote(path[len("/api/web-routes/") :])
+            route = next(
+                (
+                    item
+                    for item in self.app.web_store.views()
+                    if item["id"] == record_id
+                ),
+                None,
+            )
+            if route is None:
+                self.send_error_json(
+                    HTTPStatus.NOT_FOUND,
+                    f"Webルートが見つかりません: {record_id}",
+                )
+            else:
+                self.send_json({"web_route": route})
             return
         if path == "/api/relay/status":
             try:
@@ -247,6 +402,119 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 finally:
                     self.app.operation_lock.release()
                 return
+            if path == "/api/web-gateway/setup":
+                if not self.acquire_operation():
+                    return
+                try:
+                    staged = self.app.store.setup_web_gateway(
+                        self.app.dashboard_target_address
+                    )
+                    self.app.terraform.invalidate_plan()
+                    self.app.audit.append(
+                        "web-gateway-setup",
+                        "success",
+                        ", ".join(
+                            f"TCP/{record.route.public_port}" for record in staged
+                        ),
+                    )
+                    self.send_store_state(HTTPStatus.CREATED)
+                finally:
+                    self.app.operation_lock.release()
+                return
+            if path == "/api/web-routes":
+                if not self.acquire_operation():
+                    return
+                try:
+                    route, one_time_credentials = self.app.web_route_from_payload(
+                        payload
+                    )
+                    self.app.web_store.create(
+                        route,
+                        desired_enabled=payload.get("desired_enabled", True),  # type: ignore[arg-type]
+                    )
+                    self.app.audit.append("web-route-create", "success", route.name)
+                    self.send_web_store_state(
+                        HTTPStatus.CREATED,
+                        one_time_basic_auth=one_time_credentials,
+                    )
+                finally:
+                    self.app.operation_lock.release()
+                return
+            if path == "/api/web-routes/preview":
+                if not self.acquire_operation():
+                    return
+                try:
+                    preview = self.app.web_store.preview()
+                    self.app.audit.append(
+                        "web-route-preview",
+                        "success",
+                        json.dumps(preview["counts"], ensure_ascii=False),
+                    )
+                    self.send_json({"preview": preview})
+                finally:
+                    self.app.operation_lock.release()
+                return
+            if path == "/api/web-routes/publish":
+                if payload.get("confirmation") != "PUBLISH":
+                    raise ValidationError(
+                        "反映するには確認欄へPUBLISHと入力してください。"
+                    )
+                if not self.acquire_operation():
+                    return
+                try:
+                    try:
+                        result = self.app.web_store.publish()
+                    except DashboardError as exc:
+                        self.app.audit.append("web-route-publish", "error", str(exc))
+                        raise
+                    self.app.audit.append(
+                        "web-route-publish",
+                        "success",
+                        (
+                            "再反映" if result["recovered"] else "通常反映"
+                        )
+                        + f": {result['active_count']}件",
+                    )
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "message": (
+                                "Webルートを再反映しました。"
+                                if result["recovered"]
+                                else "WebルートをTraefikへ反映しました。"
+                            ),
+                            **result,
+                            "web_routes": self.app.web_store.views(),
+                            "web_routes_status": self.app.web_store.status(),
+                        }
+                    )
+                finally:
+                    self.app.operation_lock.release()
+                return
+            web_route_prefix = "/api/web-routes/"
+            web_cancel_suffix = "/cancel-delete"
+            if (
+                path.startswith(web_route_prefix)
+                and path.endswith(web_cancel_suffix)
+            ):
+                if not self.acquire_operation():
+                    return
+                try:
+                    record_id = unquote(
+                        path[
+                            len(web_route_prefix) : -len(web_cancel_suffix)
+                        ]
+                    )
+                    restored = self.app.web_store.cancel_delete(record_id)
+                    self.app.audit.append(
+                        "web-route-delete-cancel",
+                        "success",
+                        restored.route.name,
+                    )
+                    self.send_web_store_state()
+                finally:
+                    self.app.operation_lock.release()
+                return
             if path == "/api/routes":
                 if not self.acquire_operation():
                     return
@@ -366,8 +634,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     }
                 )
                 return
-            route_prefix = "/api/routes/"
+            web_route_prefix = "/api/web-routes/"
             enabled_suffix = "/enabled"
+            if (
+                path.startswith(web_route_prefix)
+                and path.endswith(enabled_suffix)
+            ):
+                record_id = unquote(
+                    path[len(web_route_prefix) : -len(enabled_suffix)]
+                )
+                updated = self.app.web_store.set_enabled(
+                    record_id,
+                    payload.get("enabled"),  # type: ignore[arg-type]
+                )
+                self.app.audit.append(
+                    (
+                        "web-route-enabled"
+                        if updated.desired_enabled
+                        else "web-route-disabled"
+                    ),
+                    "success",
+                    updated.route.name,
+                )
+                self.send_web_store_state()
+                return
+            if path.startswith(web_route_prefix):
+                record_id = unquote(path[len(web_route_prefix) :])
+                existing = self.app.web_store.record(record_id).route
+                route, one_time_credentials = self.app.web_route_from_payload(
+                    payload,
+                    existing,
+                )
+                updated = self.app.web_store.update(record_id, route)
+                self.app.audit.append(
+                    "web-route-update",
+                    "success",
+                    updated.route.name,
+                )
+                self.send_web_store_state(
+                    one_time_basic_auth=one_time_credentials,
+                )
+                return
+            route_prefix = "/api/routes/"
             if path.startswith(route_prefix) and path.endswith(enabled_suffix):
                 record_id = unquote(
                     path[len(route_prefix) : -len(enabled_suffix)]
@@ -495,7 +803,57 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             route_prefix = "/api/routes/"
             history_prefix = "/api/deleted-routes/"
+            web_route_prefix = "/api/web-routes/"
+            web_history_prefix = "/api/deleted-web-routes/"
             group_prefix = "/api/groups/"
+            if path.startswith(web_route_prefix):
+                record_id = unquote(path[len(web_route_prefix) :])
+                record = next(
+                    (
+                        item
+                        for item in self.app.web_store.views()
+                        if item["id"] == record_id
+                    ),
+                    None,
+                )
+                if record is None:
+                    raise DashboardError(
+                        f"Webルートが見つかりません: {record_id}"
+                    )
+                cancelled = self.app.web_store.delete(record_id)
+                self.app.audit.append(
+                    (
+                        "web-route-create-cancel"
+                        if cancelled
+                        else "web-route-delete-pending"
+                    ),
+                    "success",
+                    str(record["name"]),
+                )
+                self.send_web_store_state()
+                return
+            if path.startswith(web_history_prefix):
+                record_id = unquote(path[len(web_history_prefix) :])
+                record = next(
+                    (
+                        item
+                        for item in self.app.web_store.views()
+                        if item["id"] == record_id
+                    ),
+                    None,
+                )
+                if record is None:
+                    raise DashboardError(
+                        f"Webルートが見つかりません: {record_id}"
+                    )
+                self.app.web_store.purge_deleted(record_id)
+                self.app.audit.append(
+                    "web-route-history-purge",
+                    "success",
+                    str(record["name"]),
+                )
+                self.send_web_store_state()
+                return
             if path.startswith(route_prefix):
                 record_id = unquote(path[len(route_prefix) :])
                 record = next(
@@ -664,9 +1022,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             {
                 "routes": self.app.store.views(),
                 "groups": self.app.store.group_views(),
+                "web_gateway": self.app.web_gateway_status(),
             },
             status,
         )
+
+    def send_web_store_state(
+        self,
+        status: HTTPStatus = HTTPStatus.OK,
+        one_time_basic_auth: dict[str, str] | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "web_routes": self.app.web_store.views(),
+            "web_routes_status": self.app.web_store.status(),
+            "web_gateway": self.app.web_gateway_status(),
+        }
+        if one_time_basic_auth is not None:
+            payload["one_time_basic_auth"] = one_time_basic_auth
+        self.send_json(payload, status)
 
     def send_wireguard_state(self) -> None:
         self.send_json(

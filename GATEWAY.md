@@ -16,14 +16,17 @@ Windows 10.99.0.2
 Traefik → mc-routerまたは各ゲームコンテナ
 ```
 
-WebはTraefikがHTTP Host名で振り分け、Minecraft Javaはmc-routerがMinecraftクライアントの接続先ホスト名で振り分けます。一般的なTCP/UDPゲームは、ゲーム固有の公開ポートごとにTraefikから対象コンテナへ転送します。
+WebはTraefikがHTTPSのHTTP Host名で振り分け、TCP/80へのアクセスは443へ転送します。
+証明書はLet's Encrypt HTTP-01で自動取得します。Minecraft Javaはmc-routerがMinecraft
+クライアントの接続先ホスト名で振り分けます。一般的なTCP/UDPゲームは、ゲーム固有の
+公開ポートごとにTraefikから対象コンテナへ転送します。
 
 ## 初期構成
 
 リポジトリの`gateway`ディレクトリには次の入口を用意しています。
 
-- TCP/80: Web用Traefik EntryPoint
-- TCP/443: HTTPS用Traefik EntryPoint
+- TCP/80: Let's Encrypt HTTP-01とHTTPSリダイレクト
+- TCP/443: HTTPS Web用Traefik EntryPoint
 - TCP/25565: Traefikからmc-routerへ転送
 - mc-routerからWindowsホスト上の各Minecraft公開ポートへ転送
 
@@ -50,6 +53,21 @@ if (-not (Test-Path gateway\.env)) {
 }
 notepad gateway\.env
 ```
+
+`TRAEFIK_ACME_EMAIL`を実際に受信できる連絡先へ変更してください。本番のLet's Encryptが
+既定です。構築中に繰り返し証明書取得を試す場合は、`gateway/.env`で次を有効にします。
+staging証明書はブラウザに信頼されないため、疎通確認後は行を削除またはコメントアウトし、
+Traefikを再作成してください。
+
+```dotenv
+TRAEFIK_ACME_EMAIL=admin@example.jp
+TRAEFIK_ACME_CA_SERVER=https://acme-staging-v02.api.letsencrypt.org/directory
+TRAEFIK_CERTIFICATES_VOLUME=onprem-relay-traefik-certificates-staging
+```
+
+本番へ切り替えるときは、CA Serverとstaging用Volumeの2行を両方削除またはコメントアウト
+します。これによりstaging証明書を本番用Volumeへ持ち込まず、既定の
+`onprem-relay-traefik-certificates`へ本番証明書を保存します。
 
 Minecraftのルートを登録します。`set`は、ホスト名が未登録なら追加、登録済みなら転送先を更新します。
 
@@ -85,6 +103,61 @@ docker compose --env-file gateway/.env -f gateway/compose.yaml pull
 docker compose --env-file gateway/.env -f gateway/compose.yaml up -d
 docker compose --env-file gateway/.env -f gateway/compose.yaml ps
 ```
+
+Compose引数やACME設定を変更した後は、再起動ではなくTraefikを再作成します。
+
+```powershell
+docker compose --env-file gateway/.env -f gateway/compose.yaml up -d --force-recreate traefik
+```
+
+証明書とACMEアカウントは`onprem-relay-traefik-certificates`という専用Docker Volumeへ
+保存され、Relay Controlにはマウントされません。通常のコンテナ再作成やイメージ更新では
+Volumeを削除しないでください。
+
+```powershell
+docker volume inspect onprem-relay-traefik-certificates
+```
+
+Volumeを削除すると証明書を再取得するため、Let's Encryptのレート制限に達する可能性が
+あります。破損時の初期化が必要な場合だけ、Traefikを停止し、Volume名を再確認したうえで
+手動削除してください。
+
+## WebサービスをRelay Controlから登録する
+
+Relay Controlの「Webサービス」で次の順に操作します。
+
+1. 「Web入口を準備」でTCP/80・443のOCI経路を下書きする
+2. 公開経路の「変更を確認」でTerraform planを確認し、`APPLY`で反映する
+3. WebルートへFQDN、Dockerネットワークエイリアス、コンテナポートを保存する
+4. 「反映内容を確認」で生成設定を確認し、`PUBLISH`でTraefikへ反映する
+5. MyDNSのAレコードをOCIの予約済みIPv4へ向ける
+
+Webルートの保存だけではTraefikを変更しません。Relay Controlが更新するのは
+`gateway/traefik/dynamic/ui-web-routes.yml`だけです。同じディレクトリにあるMinecraftや
+ゲーム用の設定ファイルには触れません。
+
+各WebサービスのComposeでは、外部ネットワークへ安定したエイリアスを付けます。
+Traefikからバックエンドへの通信はHTTPで、ホストへの`ports`公開は不要です。
+
+```yaml
+services:
+  app:
+    image: example/app:1.0
+    expose:
+      - "8080"
+    networks:
+      relay-ingress:
+        aliases:
+          - app-service
+
+networks:
+  relay-ingress:
+    external: true
+    name: onprem-relay-ingress
+```
+
+Relay Controlはコンテナの存在確認、起動、更新、Volume、環境変数を管理しません。
+エイリアスが存在しない、またはサービスが停止している場合は`502 Bad Gateway`になります。
 
 ログ確認:
 
@@ -198,7 +271,7 @@ minecraft-hardcore.example.mydns.jp
 
 新しいゲームは次の3層へ同じ公開ポートを追加します。
 
-1. Windows入口ComposeとTraefik EntryPoint
+1. Windows入口ComposeのTraefik EntryPoint
 2. Terraformの`public_tcp_ports`または`public_udp_ports`
 3. OCIの`wg-relay forward`
 
@@ -206,18 +279,14 @@ minecraft-hardcore.example.mydns.jp
 
 `gateway/traefik/examples/7d2d.yml`を`gateway/traefik/dynamic/7d2d.yml`へコピーします。
 
-Traefikの静的設定へ追加します。
+`gateway/compose.yaml`のTraefik `command`へEntryPointを追加します。
 
 ```yaml
-entryPoints:
-  seven-days-to-die-tcp:
-    address: ":26900"
-  seven-days-to-die-udp-main:
-    address: ":26900/udp"
-  seven-days-to-die-udp-plus-1:
-    address: ":26901/udp"
-  seven-days-to-die-udp-plus-2:
-    address: ":26902/udp"
+command:
+  - --entryPoints.seven-days-to-die-tcp.address=:26900
+  - --entryPoints.seven-days-to-die-udp-main.address=:26900/udp
+  - --entryPoints.seven-days-to-die-udp-plus-1.address=:26901/udp
+  - --entryPoints.seven-days-to-die-udp-plus-2.address=:26902/udp
 ```
 
 Traefikコンテナの`ports`へ追加します。
