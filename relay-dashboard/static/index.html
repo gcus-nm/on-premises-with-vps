@@ -424,6 +424,27 @@
           <span>説明</span>
           <input id="web-route-description" maxlength="120" placeholder="管理画面">
         </label>
+        <label>
+          <span>公開前Basic認証</span>
+          <span>
+            <input id="web-route-basic-auth-enabled" type="checkbox">
+            このWebルートへ専用Basic認証を追加する
+          </span>
+          <small>パスワードは自動生成され、保存時に一度だけ表示されます。</small>
+        </label>
+        <div class="field-grid" id="web-route-basic-auth-fields" hidden>
+          <label>
+            <span>Basic認証ユーザー名</span>
+            <input id="web-route-basic-auth-username" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" placeholder="reader">
+          </label>
+          <label id="web-route-basic-auth-rotate-label" hidden>
+            <span>パスワード再生成</span>
+            <span>
+              <input id="web-route-basic-auth-rotate" type="checkbox">
+              保存時に新しい値へ置き換える
+            </span>
+          </label>
+        </div>
         <details class="advanced-zone" id="web-route-advanced" hidden>
           <summary>高度な操作</summary>
           <p id="web-route-advanced-description">

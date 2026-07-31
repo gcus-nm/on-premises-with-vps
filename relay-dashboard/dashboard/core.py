@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import configparser
 import hashlib
 import hmac
@@ -21,6 +22,8 @@ from typing import Any, Callable, Iterable
 ROUTE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,27}$")
 DOCKER_ALIAS_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+BASIC_AUTH_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+BASIC_AUTH_SHA1_PATTERN = re.compile(r"^\{SHA\}[A-Za-z0-9+/]{27}=$")
 GROUP_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,17}$")
 WIREGUARD_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 EXISTING_WIREGUARD_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
@@ -135,6 +138,12 @@ class WebRoute:
     docker_alias: str
     container_port: int
     description: str = ""
+    basic_auth_username: str = ""
+    basic_auth_password_hash: str = ""
+
+    @property
+    def basic_auth_enabled(self) -> bool:
+        return bool(self.basic_auth_username and self.basic_auth_password_hash)
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "WebRoute":
@@ -144,6 +153,10 @@ class WebRoute:
             raw_hostname = raw_hostname[:-1]
         docker_alias = str(value.get("docker_alias", "")).strip().lower()
         description = str(value.get("description", "")).strip()
+        basic_auth_username = str(value.get("basic_auth_username", "")).strip()
+        basic_auth_password_hash = str(
+            value.get("basic_auth_password_hash", "")
+        ).strip()
 
         if not ROUTE_NAME_PATTERN.fullmatch(name):
             raise ValidationError(
@@ -179,6 +192,21 @@ class WebRoute:
             raise ValidationError("予約済みのDockerエイリアスは使用できません。")
         if len(description) > 120:
             raise ValidationError("説明は120文字以内にしてください。")
+        if bool(basic_auth_username) != bool(basic_auth_password_hash):
+            raise ValidationError(
+                "Basic認証のユーザー名とパスワードハッシュは両方指定してください。"
+            )
+        if basic_auth_username and not BASIC_AUTH_USERNAME_PATTERN.fullmatch(
+            basic_auth_username
+        ):
+            raise ValidationError(
+                "Basic認証のユーザー名は英数字で始まる1〜64文字とし、"
+                "英数字、ピリオド、アンダースコア、ハイフンだけを使用してください。"
+            )
+        if basic_auth_password_hash and not BASIC_AUTH_SHA1_PATTERN.fullmatch(
+            basic_auth_password_hash
+        ):
+            raise ValidationError("Basic認証のパスワードハッシュ形式が不正です。")
 
         return cls(
             name=name,
@@ -186,6 +214,8 @@ class WebRoute:
             docker_alias=docker_alias,
             container_port=parse_port(value.get("container_port"), "コンテナポート"),
             description=description,
+            basic_auth_username=basic_auth_username,
+            basic_auth_password_hash=basic_auth_password_hash,
         )
 
 
@@ -1549,6 +1579,55 @@ class RouteStore:
 
 
 WEB_ROUTE_MARKER = "# Managed by OCI Relay Control. Do not edit directly."
+WEB_ROUTE_AUTH_FILE_PATTERN = "ui-web-*-auth-*.htpasswd"
+
+
+def hash_basic_auth_password(password: str) -> str:
+    if len(password) < 32:
+        raise ValidationError("自動生成Basic認証パスワードが短すぎます。")
+    digest = hashlib.sha1(password.encode("utf-8"), usedforsecurity=False).digest()
+    return "{SHA}" + base64.b64encode(digest).decode("ascii")
+
+
+def web_route_public_mapping(route: WebRoute) -> dict[str, Any]:
+    return {
+        "name": route.name,
+        "hostname": route.hostname,
+        "docker_alias": route.docker_alias,
+        "container_port": route.container_port,
+        "description": route.description,
+        "basic_auth_enabled": route.basic_auth_enabled,
+        "basic_auth_username": (
+            route.basic_auth_username if route.basic_auth_enabled else ""
+        ),
+    }
+
+
+def web_route_auth_filename(route: WebRoute) -> str:
+    if not route.basic_auth_enabled:
+        raise ValidationError("Basic認証が無効なWebルートです。")
+    fingerprint = hashlib.sha256(
+        route.basic_auth_password_hash.encode("ascii")
+    ).hexdigest()[:12]
+    return f"ui-web-{route.name}-auth-{fingerprint}.htpasswd"
+
+
+def render_web_route_auth_files(
+    records: Iterable[WebRouteRecord],
+) -> dict[str, str]:
+    return {
+        web_route_auth_filename(record.route): (
+            f"{record.route.basic_auth_username}:"
+            f"{record.route.basic_auth_password_hash}\n"
+        )
+        for record in records
+        if (
+            record.desired_active
+            and record.desired_enabled
+            and record.deleted_at is None
+            and record.route.basic_auth_enabled
+        )
+    }
 
 
 def web_routes_fingerprint(records: Iterable[WebRouteRecord]) -> str:
@@ -1596,15 +1675,44 @@ def render_web_routes_config(records: Iterable[WebRouteRecord]) -> str:
         for record in active:
             route = record.route
             key = f"ui-web-{route.name}"
-            lines.extend(
+            router = [
+                f"    {key}:",
+                "      entryPoints:",
+                "        - websecure",
+                f"      rule: {json.dumps(f'Host(`{route.hostname}`)')}",
+            ]
+            if route.basic_auth_enabled:
+                router.extend(
+                    [
+                        "      middlewares:",
+                        f"        - {key}-auth",
+                    ]
+                )
+            router.extend(
                 [
-                    f"    {key}:",
-                    "      entryPoints:",
-                    "        - websecure",
-                    f"      rule: {json.dumps(f'Host(`{route.hostname}`)')}",
                     f"      service: {key}",
                     "      tls:",
                     "        certResolver: letsencrypt",
+                ]
+            )
+            lines.extend(router)
+    authenticated = [record for record in active if record.route.basic_auth_enabled]
+    if authenticated:
+        lines.append("  middlewares:")
+        for record in authenticated:
+            route = record.route
+            key = f"ui-web-{route.name}-auth"
+            auth_file = web_route_auth_filename(route)
+            lines.extend(
+                [
+                    f"    {key}:",
+                    "      basicAuth:",
+                    (
+                        "        usersFile: "
+                        + json.dumps(f"/etc/traefik/dynamic/{auth_file}")
+                    ),
+                    f"        realm: {json.dumps(f'OCI Relay {route.name}')}",
+                    "        removeHeader: true",
                 ]
             )
     if not active:
@@ -1638,6 +1746,11 @@ class WebRouteStore:
         with self.lock:
             records, _ = self._load()
             return records
+
+    def record(self, record_id: str) -> WebRouteRecord:
+        with self.lock:
+            records, _ = self._load()
+            return self._find(records, record_id)
 
     def views(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -1786,6 +1899,7 @@ class WebRouteStore:
                             f"http://{record.route.docker_alias}:"
                             f"{record.route.container_port}"
                         ),
+                        "basic_auth_enabled": record.route.basic_auth_enabled,
                     }
                     for record in sorted(
                         records,
@@ -1835,7 +1949,14 @@ class WebRouteStore:
                     raise DashboardError("反映途中のWebルート設定データが破損しています。")
 
                 self._require_managed_target()
+            auth_files = render_web_route_auth_files(records)
             try:
+                for filename, content in auth_files.items():
+                    atomic_write_text(
+                        self.dynamic_config_path.parent / filename,
+                        content,
+                        mode=0o600,
+                    )
                 atomic_write_text(self.dynamic_config_path, config, mode=0o644)
             except OSError as exc:
                 raise DashboardError(
@@ -1846,6 +1967,14 @@ class WebRouteStore:
 
             committed = self._commit_pending(records, pending_publish)
             self._save(committed, None)
+            for path in self.dynamic_config_path.parent.glob(
+                WEB_ROUTE_AUTH_FILE_PATTERN
+            ):
+                if path.name not in auth_files:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
             try:
                 self.preview_path.unlink()
             except FileNotFoundError:
@@ -2166,7 +2295,7 @@ class WebRouteStore:
             group = "disabled"
         return {
             "id": record.id,
-            **asdict(record.route),
+            **web_route_public_mapping(record.route),
             "desired_enabled": record.desired_enabled,
             "applied_enabled": record.applied_enabled,
             "state": state,

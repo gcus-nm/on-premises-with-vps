@@ -44,6 +44,7 @@ generated/wireguard/
 gateway/.env
 gateway/mc-router/routes.json
 gateway/traefik/dynamic/ui-web-routes.yml
+gateway/traefik/dynamic/ui-web-*-auth-*.htpasswd
 
 # Relay dashboard credentials and local runtime overrides.
 relay-dashboard/.env

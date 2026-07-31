@@ -23,6 +23,7 @@ from dashboard.core import (
     WireGuardPeer,
     analyze_terraform_plan,
     compact_port_ranges,
+    hash_basic_auth_password,
     normalize_peer_address,
     oci_config_status,
     parse_peer_access_rules,
@@ -120,6 +121,32 @@ class WebRouteTests(unittest.TestCase):
         self.assertEqual(result.hostname, "app.oci.example.jp")
         self.assertEqual(result.docker_alias, "app-service")
         self.assertEqual(result.container_port, 8080)
+        self.assertFalse(result.basic_auth_enabled)
+
+    def test_validates_basic_auth_fields(self) -> None:
+        password_hash = hash_basic_auth_password("x" * 32)
+        result = web_route(
+            basic_auth_username="reader",
+            basic_auth_password_hash=password_hash,
+        )
+        self.assertTrue(result.basic_auth_enabled)
+        self.assertEqual(result.basic_auth_username, "reader")
+
+        invalid = (
+            {"basic_auth_username": "reader"},
+            {"basic_auth_password_hash": password_hash},
+            {
+                "basic_auth_username": "bad:user",
+                "basic_auth_password_hash": password_hash,
+            },
+            {
+                "basic_auth_username": "reader",
+                "basic_auth_password_hash": "$2y$not-supported-here",
+            },
+        )
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises(ValidationError):
+                web_route(**values)
 
     def test_rejects_invalid_hostname_alias_and_port(self) -> None:
         invalid = (
@@ -176,6 +203,41 @@ class WebRouteTests(unittest.TestCase):
             store.set_enabled(first.id, False)
             with self.assertRaises(ConflictError):
                 store.publish()
+
+    def test_publish_writes_redacted_basic_auth_middleware_and_users_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "dynamic" / "ui-web-routes.yml"
+            config.parent.mkdir()
+            password_hash = hash_basic_auth_password("secret-" + "x" * 32)
+            store = WebRouteStore(root / "data", config)
+            store.create(
+                web_route(
+                    basic_auth_username="comic-reader",
+                    basic_auth_password_hash=password_hash,
+                )
+            )
+
+            preview = store.preview()
+            self.assertIn("basicAuth:", preview["config"])
+            self.assertIn("usersFile:", preview["config"])
+            self.assertIn("removeHeader: true", preview["config"])
+            self.assertNotIn(password_hash, preview["config"])
+            self.assertTrue(preview["routes"][0]["basic_auth_enabled"])
+
+            store.publish()
+            auth_files = list(config.parent.glob("ui-web-*-auth-*.htpasswd"))
+            self.assertEqual(len(auth_files), 1)
+            self.assertEqual(
+                auth_files[0].read_text(encoding="utf-8"),
+                f"comic-reader:{password_hash}\n",
+            )
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(auth_files[0].stat().st_mode), 0o600)
+            view = store.views()[0]
+            self.assertTrue(view["basic_auth_enabled"])
+            self.assertEqual(view["basic_auth_username"], "comic-reader")
+            self.assertNotIn("basic_auth_password_hash", view)
 
     def test_rejects_duplicate_name_and_hostname(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

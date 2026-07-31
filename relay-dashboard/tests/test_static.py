@@ -125,6 +125,9 @@ class RouteDialogMarkupTests(unittest.TestCase):
             "web-route-dialog",
             "web-publish-dialog",
             "web-publish-confirmation",
+            "web-route-basic-auth-enabled",
+            "web-route-basic-auth-username",
+            "web-route-basic-auth-rotate",
         ):
             self.assertIn(f'id="{element_id}"', html)
         for endpoint in (
@@ -138,6 +141,8 @@ class RouteDialogMarkupTests(unittest.TestCase):
         self.assertIn("PUBLISH", html)
         self.assertIn("502 Bad Gateway", html)
         self.assertIn("onprem-relay-ingress", html)
+        self.assertIn("one_time_basic_auth", javascript)
+        self.assertIn("今回だけ表示", javascript)
 
 
 if __name__ == "__main__":

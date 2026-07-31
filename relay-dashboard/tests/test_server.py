@@ -243,6 +243,82 @@ class DashboardServerTests(unittest.TestCase):
         )
         self.assertIn('"action": "web-route-publish"', audit)
 
+    def test_web_route_basic_auth_is_generated_once_and_redacted(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        route = {
+            "name": "private-app",
+            "hostname": "private.oci.example.jp",
+            "docker_alias": "private-app",
+            "container_port": 8080,
+            "description": "Private App",
+            "basic_auth_enabled": True,
+            "basic_auth_username": "reader",
+        }
+
+        status, created = self.request(
+            "/api/web-routes",
+            method="POST",
+            body=route,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 201)
+        credentials = created["one_time_basic_auth"]  # type: ignore[index]
+        self.assertEqual(credentials["username"], "reader")  # type: ignore[index]
+        password = str(credentials["password"])  # type: ignore[index]
+        self.assertGreaterEqual(len(password), 40)
+        created_route = created["web_routes"][0]  # type: ignore[index]
+        self.assertTrue(created_route["basic_auth_enabled"])
+        self.assertNotIn("basic_auth_password_hash", created_route)
+        self.assertNotIn("{SHA}", json.dumps(created))
+        record_id = str(created_route["id"])
+
+        status, updated = self.request(
+            f"/api/web-routes/{record_id}",
+            method="PUT",
+            body={
+                "name": "private-app",
+                "hostname": "private.oci.example.jp",
+                "docker_alias": "private-app",
+                "container_port": 8081,
+                "description": "Private App",
+            },
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn("one_time_basic_auth", updated)
+        self.assertTrue(updated["web_routes"][0]["basic_auth_enabled"])  # type: ignore[index]
+
+        _, preview = self.request(
+            "/api/web-routes/preview",
+            method="POST",
+            body={},
+            csrf=csrf,
+        )
+        config = str(preview["preview"]["config"])  # type: ignore[index]
+        self.assertIn("basicAuth:", config)
+        self.assertNotIn(password, config)
+        self.assertNotIn("{SHA}", config)
+
+        status, published = self.request(
+            "/api/web-routes/publish",
+            method="POST",
+            body={"confirmation": "PUBLISH"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(published["web_routes"][0]["state"], "enabled")  # type: ignore[index]
+        auth_files = list(
+            (
+                Path(self.temporary.name)
+                / "traefik-dynamic"
+            ).glob("ui-web-private-app-auth-*.htpasswd")
+        )
+        self.assertEqual(len(auth_files), 1)
+        users_file = auth_files[0].read_text(encoding="utf-8")
+        self.assertTrue(users_file.startswith("reader:{SHA}"))
+        self.assertNotIn(password, users_file)
+
     def test_web_gateway_setup_is_atomic_and_rejects_conflict(self) -> None:
         _, state = self.request("/api/state")
         csrf = str(state["csrf_token"])

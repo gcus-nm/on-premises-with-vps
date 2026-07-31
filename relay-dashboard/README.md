@@ -7,6 +7,7 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - TerraformによるOCI Network Security Groupの公開ポート
 - `wg-relay`によるOCIからWireGuard PeerへのDNAT・SNAT
 - HTTPS Webルート（FQDNからDockerネットワークエイリアスへの振り分け）
+- Webルート単位の自動生成Basic認証
 - WireGuard Peerの追加・鍵更新・削除
 - WireGuard Peer間のTCP/UDPアクセス制御
 
@@ -29,6 +30,9 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - Docker socketはマウントしない
 - Traefik APIと証明書Volumeはマウントしない
 - Traefik動的設定ディレクトリではマーカー付き`ui-web-routes.yml`だけを更新する
+- Webルート用Basic認証の平文パスワードは保存せず、生成時のAPI応答で一度だけ返す
+- Basic認証ハッシュはWebルートAPIやプレビューへ表示せず、Traefik専用ファイルへ
+  `0600`で保存する
 - Linux Capabilityをすべて削除する
 - 公開経路のGUI管理ルールには`ui-`を付け、既存の手動公開ルールを削除しない
 - Terraform planにNSG公開ルール以外の変更が含まれたらapplyを禁止する
@@ -213,6 +217,8 @@ Relay Controlを再作成します。
 2. 公開経路の「変更を確認」でTCP/80・443だけが追加されることを確認する
 3. `APPLY`を入力してOCI NSGとリレーへ反映する
 4. 「＋ Webルート」から名前、FQDN、Dockerエイリアス、コンテナポート、説明を保存する
+   - 個人データを扱うサービスでは「公開前Basic認証」を有効にする
+   - パスワードは自動生成され一度だけ表示されるため、パスワード管理ツールへ保存する
 5. 「反映内容を確認」でドメインと転送先、生成設定を確認する
 6. `PUBLISH`を入力してTraefikへ反映する
 7. MyDNSのAレコードをOCIの予約済みIPv4へ向け、外部回線からHTTPSを確認する
@@ -226,6 +232,12 @@ Webルートの保存は下書きです。プレビュー後にルートを変�
 検出・起動しないため、対象サービスをホスト側Composeで`onprem-relay-ingress`へ接続し、
 登録したネットワークエイリアスで到達できるようにしてください。存在しない場合は
 `502 Bad Gateway`になります。
+
+WebルートのBasic認証はTraefikでアプリより先に検証し、成功後の`Authorization`
+ヘッダーはバックエンドへ転送しません。ユーザー名とパスワードはWebルートごとに独立し、
+Relay Control管理画面の資格情報を流用しません。パスワードは256ビット相当の乱数から
+自動生成し、Traefikが対応するhtpasswd SHA-1形式のハッシュだけを保存します。
+平文パスワードは作成または再生成時に一度だけ返し、操作履歴やWebルートJSONへ保存しません。
 
 MyDNS、コンテナ、Windows FirewallはWeb UIの管理対象外です。現在のIPv4転送を使用し、
 AAAAレコードは追加しません。OCIのSNATにより実クライアントIPはバックエンドへ渡りません。

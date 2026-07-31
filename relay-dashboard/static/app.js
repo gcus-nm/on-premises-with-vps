@@ -67,6 +67,11 @@ const elements = {
   webRouteAlias: document.querySelector("#web-route-alias"),
   webRoutePort: document.querySelector("#web-route-port"),
   webRouteDescription: document.querySelector("#web-route-description"),
+  webRouteBasicAuthEnabled: document.querySelector("#web-route-basic-auth-enabled"),
+  webRouteBasicAuthFields: document.querySelector("#web-route-basic-auth-fields"),
+  webRouteBasicAuthUsername: document.querySelector("#web-route-basic-auth-username"),
+  webRouteBasicAuthRotate: document.querySelector("#web-route-basic-auth-rotate"),
+  webRouteBasicAuthRotateLabel: document.querySelector("#web-route-basic-auth-rotate-label"),
   webRouteAdvanced: document.querySelector("#web-route-advanced"),
   webRouteAdvancedDescription: document.querySelector("#web-route-advanced-description"),
   deleteWebRouteButton: document.querySelector("#delete-web-route-button"),
@@ -496,7 +501,7 @@ function renderWebRouteItem(route, locked) {
     <div class="web-route-item state-${escapeAttribute(route.state)}">
       <div class="route-main">
         <span class="route-name">${escapeHtml(route.name)}</span>
-        <small>${escapeHtml(route.description || "説明なし")}</small>
+        <small>${escapeHtml(route.description || "説明なし")}${route.basic_auth_enabled ? "・Basic認証" : ""}</small>
       </div>
       <span class="web-hostname">${escapeHtml(route.hostname)}</span>
       <span class="web-route-arrow">→</span>
@@ -961,6 +966,9 @@ function openNewWebRoute() {
   elements.webRouteDialogTitle.textContent = "Webルートを追加";
   elements.webRouteAdvanced.hidden = true;
   elements.webRouteAdvanced.removeAttribute("open");
+  elements.webRouteBasicAuthUsername.value = "";
+  elements.webRouteBasicAuthRotate.checked = false;
+  syncWebRouteBasicAuthFields();
   elements.webRouteFormError.textContent = "";
   setWebRouteEditorReadonly(false);
   elements.webRouteDialog.showModal();
@@ -978,6 +986,10 @@ function openEditWebRoute(id) {
   elements.webRouteAlias.value = route.docker_alias;
   elements.webRoutePort.value = route.container_port;
   elements.webRouteDescription.value = route.description || "";
+  elements.webRouteBasicAuthEnabled.checked = Boolean(route.basic_auth_enabled);
+  elements.webRouteBasicAuthUsername.value = route.basic_auth_username || route.name;
+  elements.webRouteBasicAuthRotate.checked = false;
+  syncWebRouteBasicAuthFields();
   setWebRouteEditorReadonly(readonly);
   elements.webRouteDialogTitle.textContent = readonly
     ? "Webルートの高度な操作"
@@ -1014,10 +1026,25 @@ function setWebRouteEditorReadonly(readonly) {
     elements.webRouteAlias,
     elements.webRoutePort,
     elements.webRouteDescription,
+    elements.webRouteBasicAuthEnabled,
+    elements.webRouteBasicAuthUsername,
+    elements.webRouteBasicAuthRotate,
   ]) {
     field.disabled = readonly;
   }
   elements.saveWebRouteButton.hidden = readonly;
+}
+
+function syncWebRouteBasicAuthFields() {
+  const enabled = elements.webRouteBasicAuthEnabled.checked;
+  const editing = Boolean(elements.webRecordId.value);
+  elements.webRouteBasicAuthFields.hidden = !enabled;
+  elements.webRouteBasicAuthUsername.required = enabled;
+  elements.webRouteBasicAuthRotateLabel.hidden = !enabled || !editing;
+  if (!enabled) elements.webRouteBasicAuthRotate.checked = false;
+  if (enabled && !elements.webRouteBasicAuthUsername.value) {
+    elements.webRouteBasicAuthUsername.value = elements.webRouteName.value || "reader";
+  }
 }
 
 async function saveWebRoute() {
@@ -1030,10 +1057,13 @@ async function saveWebRoute() {
     docker_alias: elements.webRouteAlias.value,
     container_port: Number(elements.webRoutePort.value),
     description: elements.webRouteDescription.value,
+    basic_auth_enabled: elements.webRouteBasicAuthEnabled.checked,
+    basic_auth_username: elements.webRouteBasicAuthUsername.value,
+    rotate_basic_auth: elements.webRouteBasicAuthRotate.checked,
   };
   setButtonBusy(elements.saveWebRouteButton, true, "保存中…");
   try {
-    await api(
+    const response = await api(
       recordId
         ? `/api/web-routes/${encodeURIComponent(recordId)}`
         : "/api/web-routes",
@@ -1041,6 +1071,13 @@ async function saveWebRoute() {
     );
     elements.webRouteDialog.close();
     await loadState();
+    if (response.one_time_basic_auth) {
+      const credentials = response.one_time_basic_auth;
+      window.prompt(
+        "Basic認証情報は今回だけ表示されます。安全な場所へ保存してください。",
+        `${credentials.username}:${credentials.password}`,
+      );
+    }
     toast("Webルートを下書き保存しました。");
   } catch (error) {
     elements.webRouteFormError.textContent = firstLine(error.message);
@@ -1860,6 +1897,7 @@ document.querySelector("#web-gateway-setup-button").addEventListener("click", se
 document.querySelector("#web-preview-button").addEventListener("click", reviewWebRoutes);
 elements.saveWebRouteButton.addEventListener("click", saveWebRoute);
 elements.deleteWebRouteButton.addEventListener("click", () => deleteWebRoute());
+elements.webRouteBasicAuthEnabled.addEventListener("change", syncWebRouteBasicAuthFields);
 elements.webPublishConfirmButton.addEventListener("click", () => publishWebRoutes());
 document.querySelector("#close-web-publish-button").addEventListener("click", () => {
   elements.webPublishDialog.close();

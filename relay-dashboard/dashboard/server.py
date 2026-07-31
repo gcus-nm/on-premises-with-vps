@@ -27,6 +27,7 @@ from dashboard.core import (
     ValidationError,
     WebRoute,
     WebRouteStore,
+    hash_basic_auth_password,
     preflight_checks,
 )
 
@@ -99,8 +100,56 @@ class AppContext:
         )
 
     @staticmethod
-    def web_route_from_payload(payload: dict[str, object]) -> WebRoute:
-        return WebRoute.from_mapping(payload)
+    def web_route_from_payload(
+        payload: dict[str, object],
+        existing: WebRoute | None = None,
+    ) -> tuple[WebRoute, dict[str, str] | None]:
+        mapping = dict(payload)
+        enabled_value = payload.get(
+            "basic_auth_enabled",
+            existing.basic_auth_enabled if existing else False,
+        )
+        rotate_value = payload.get("rotate_basic_auth", False)
+        if not isinstance(enabled_value, bool):
+            raise ValidationError("Basic認証の有効状態はtrueまたはfalseで指定してください。")
+        if not isinstance(rotate_value, bool):
+            raise ValidationError("Basic認証の再生成状態はtrueまたはfalseで指定してください。")
+        mapping.pop("basic_auth_enabled", None)
+        mapping.pop("rotate_basic_auth", None)
+
+        one_time_credentials: dict[str, str] | None = None
+        if enabled_value:
+            username = str(
+                payload.get(
+                    "basic_auth_username",
+                    existing.basic_auth_username if existing else mapping.get("name", ""),
+                )
+            ).strip()
+            password_hash = (
+                existing.basic_auth_password_hash
+                if existing and existing.basic_auth_enabled
+                else ""
+            )
+            if (
+                not password_hash
+                or rotate_value
+                or (
+                    existing is not None
+                    and username != existing.basic_auth_username
+                )
+            ):
+                password = secrets.token_urlsafe(32)
+                password_hash = hash_basic_auth_password(password)
+                one_time_credentials = {
+                    "username": username,
+                    "password": password,
+                }
+            mapping["basic_auth_username"] = username
+            mapping["basic_auth_password_hash"] = password_hash
+        else:
+            mapping["basic_auth_username"] = ""
+            mapping["basic_auth_password_hash"] = ""
+        return WebRoute.from_mapping(mapping), one_time_credentials
 
     def web_gateway_status(self) -> dict[str, object]:
         ports: dict[str, dict[str, object]] = {}
@@ -376,13 +425,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not self.acquire_operation():
                     return
                 try:
-                    route = self.app.web_route_from_payload(payload)
+                    route, one_time_credentials = self.app.web_route_from_payload(
+                        payload
+                    )
                     self.app.web_store.create(
                         route,
                         desired_enabled=payload.get("desired_enabled", True),  # type: ignore[arg-type]
                     )
                     self.app.audit.append("web-route-create", "success", route.name)
-                    self.send_web_store_state(HTTPStatus.CREATED)
+                    self.send_web_store_state(
+                        HTTPStatus.CREATED,
+                        one_time_basic_auth=one_time_credentials,
+                    )
                 finally:
                     self.app.operation_lock.release()
                 return
@@ -606,14 +660,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith(web_route_prefix):
                 record_id = unquote(path[len(web_route_prefix) :])
-                route = self.app.web_route_from_payload(payload)
+                existing = self.app.web_store.record(record_id).route
+                route, one_time_credentials = self.app.web_route_from_payload(
+                    payload,
+                    existing,
+                )
                 updated = self.app.web_store.update(record_id, route)
                 self.app.audit.append(
                     "web-route-update",
                     "success",
                     updated.route.name,
                 )
-                self.send_web_store_state()
+                self.send_web_store_state(
+                    one_time_basic_auth=one_time_credentials,
+                )
                 return
             route_prefix = "/api/routes/"
             if path.startswith(route_prefix) and path.endswith(enabled_suffix):
@@ -967,15 +1027,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             status,
         )
 
-    def send_web_store_state(self, status: HTTPStatus = HTTPStatus.OK) -> None:
-        self.send_json(
-            {
-                "web_routes": self.app.web_store.views(),
-                "web_routes_status": self.app.web_store.status(),
-                "web_gateway": self.app.web_gateway_status(),
-            },
-            status,
-        )
+    def send_web_store_state(
+        self,
+        status: HTTPStatus = HTTPStatus.OK,
+        one_time_basic_auth: dict[str, str] | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "web_routes": self.app.web_store.views(),
+            "web_routes_status": self.app.web_store.status(),
+            "web_gateway": self.app.web_gateway_status(),
+        }
+        if one_time_basic_auth is not None:
+            payload["one_time_basic_auth"] = one_time_basic_auth
+        self.send_json(payload, status)
 
     def send_wireguard_state(self) -> None:
         self.send_json(
