@@ -1,0 +1,17 @@
+http:
+  routers:
+    docker-dashboard-next:
+      rule: "Host(`dashboard.oci.gcusnm.mydns.jp`)"
+      entryPoints:
+        - websecure
+      service: docker-dashboard-next
+      priority: 100
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    docker-dashboard-next:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: http://docker-dashboard-next:8081
