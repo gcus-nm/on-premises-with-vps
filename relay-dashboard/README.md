@@ -57,7 +57,6 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 
 - Dockerコンテナの起動、更新、Volume、環境変数、ネットワーク接続
 - MyDNSのAレコード
-- Minecraftのmc-routerホスト名マッピング
 - `wg-relay`の初回インストール、初期化、サーバー鍵の再生成
 - Windows Firewallの直接変更
 
@@ -186,15 +185,15 @@ docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml u
 
 ## 5. 最初の経路を作成する
 
-Minecraft共通入口の場合:
+WindowsホストのTCP/41409で待ち受けるMinecraftサーバーへ直接転送する場合:
 
 | 項目 | 値 |
 |---|---|
 | 経路名 | `minecraft` |
 | プロトコル | `TCP` |
-| OCI公開ポート | `25565` |
+| OCI公開ポート | `41409` |
 | 転送先アドレス | `10.99.0.2` |
-| MiniPCポート | `25565` |
+| MiniPCポート | `41409` |
 
 保存後、次の順で操作します。
 
@@ -206,7 +205,8 @@ Minecraft共通入口の場合:
 6. 「OCIへ適用」を選択
 7. 「リレー状態」で`ui-minecraft`が希望どおりか確認
 
-Minecraftのサブドメイン振り分けは、従来どおり`mc-route.ps1`で設定します。GUIのTCP/25565経路は、その手前のOCI公開入口を担当します。
+Minecraftクライアントには`<OCIを向くホスト名>:41409`を指定します。Traefikやmc-routerは
+経由しません。別のMinecraftサーバーは異なる公開ポートとMiniPCポートで経路を追加します。
 
 ## Webサービスを公開する
 

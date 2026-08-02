@@ -12,14 +12,15 @@ OCI Network Security Group
 OCI wg-relay（DNAT + SNAT）
   ↓ WireGuard
 Windows 10.99.0.2
-  ↓
-Traefik → mc-routerまたは各ゲームコンテナ
+  ├─ TCP/80・443 → Traefik → Webコンテナ
+  └─ ゲーム固有ポート → 各ゲームコンテナ
 ```
 
 WebはTraefikがHTTPSのHTTP Host名で振り分け、TCP/80へのアクセスは443へ転送します。
-証明書はLet's Encrypt HTTP-01で自動取得します。Minecraft Javaはmc-routerがMinecraft
-クライアントの接続先ホスト名で振り分けます。一般的なTCP/UDPゲームは、ゲーム固有の
-公開ポートごとにTraefikから対象コンテナへ転送します。
+証明書はLet's Encrypt HTTP-01で自動取得します。Minecraftを含むTCP/UDPゲームは、
+ゲームコンテナがWindowsホストへ公開したポートへOCIから直接転送します。
+クライアントは接続先ポートを指定するため、ゲーム用のTraefik EntryPointやmc-routerは
+使用しません。
 
 ## 初期構成
 
@@ -27,21 +28,9 @@ WebはTraefikがHTTPSのHTTP Host名で振り分け、TCP/80へのアクセス�
 
 - TCP/80: Let's Encrypt HTTP-01とHTTPSリダイレクト
 - TCP/443: HTTPS Web用Traefik EntryPoint
-- TCP/25565: Traefikからmc-routerへ転送
-- mc-routerからWindowsホスト上の各Minecraft公開ポートへ転送
 
-Minecraftのマッピング例:
-
-| 接続先ホスト名 | Windowsホスト上の転送先 |
-|---|---:|
-| `minecraft.<MyDNSドメイン>` | TCP/41409 |
-| `minecraft-hardcore.<MyDNSドメイン>` | TCP/41411 |
-
-ホスト名にはアンダースコアではなくハイフンを使用してください。
-
-実際のマッピングはGit管理対象外の`gateway/mc-router/routes.json`へ保存します。PowerShell管理コマンドから追加・更新・削除でき、mc-routerが変更を自動的に再読み込みします。
-
-この構成では、mc-router公式の[`ROUTES_CONFIG`と`ROUTES_CONFIG_WATCH`](https://github.com/itzg/mc-router#routing-configuration)を使用します。
+ゲーム用ポートは`gateway/compose.yaml`で公開しません。各ゲームコンテナの`ports`と、
+OCI NSG・`wg-relay forward`で管理します。
 
 ## 1. Windowsで入口設定を準備する
 
@@ -69,29 +58,11 @@ TRAEFIK_CERTIFICATES_VOLUME=onprem-relay-traefik-certificates-staging
 します。これによりstaging証明書を本番用Volumeへ持ち込まず、既定の
 `onprem-relay-traefik-certificates`へ本番証明書を保存します。
 
-Minecraftのルートを登録します。`set`は、ホスト名が未登録なら追加、登録済みなら転送先を更新します。
-
-```powershell
-.\scripts\mc-route.ps1 set `
-  minecraft.example.mydns.jp `
-  host.docker.internal:41409
-
-.\scripts\mc-route.ps1 set `
-  minecraft-hardcore.example.mydns.jp `
-  host.docker.internal:41411
-
-.\scripts\mc-route.ps1 list
-```
-
-`gateway/.env`と`gateway/mc-router/routes.json`はGit管理対象外です。マッピングのJSONを直接編集する必要はありません。
-
-既存MinecraftコンテナがWindowsホストの41409と41411へ公開されていることを確認します。
+ゲームコンテナが必要なTCP/UDPポートをWindowsホストへ公開していることを確認します。
 
 ```powershell
 docker ps --format "table {{.Names}}\t{{.Ports}}"
 ```
-
-mc-routerはDocker Desktopの`host.docker.internal`を通して、この2ポートへ接続します。
 
 ## 2. Windowsで入口コンテナを起動する
 
@@ -100,9 +71,12 @@ mc-routerはDocker Desktopの`host.docker.internal`を通して、この2ポー�
 ```powershell
 docker compose --env-file gateway/.env -f gateway/compose.yaml config
 docker compose --env-file gateway/.env -f gateway/compose.yaml pull
-docker compose --env-file gateway/.env -f gateway/compose.yaml up -d
+docker compose --env-file gateway/.env -f gateway/compose.yaml up -d --remove-orphans
 docker compose --env-file gateway/.env -f gateway/compose.yaml ps
 ```
+
+`--remove-orphans`は、以前の構成で起動したmc-routerなど、現在のComposeに存在しない
+コンテナを停止して削除します。Traefikの証明書Volumeは削除しません。
 
 Compose引数やACME設定を変更した後は、再起動ではなくTraefikを再作成します。
 
@@ -133,8 +107,7 @@ Relay Controlの「Webサービス」で次の順に操作します。
 5. MyDNSのAレコードをOCIの予約済みIPv4へ向ける
 
 Webルートの保存だけではTraefikを変更しません。Relay Controlが更新するのは
-`gateway/traefik/dynamic/ui-web-routes.yml`だけです。同じディレクトリにあるMinecraftや
-ゲーム用の設定ファイルには触れません。
+`gateway/traefik/dynamic/ui-web-routes.yml`だけです。
 
 各WebサービスのComposeでは、外部ネットワークへ安定したエイリアスを付けます。
 Traefikからバックエンドへの通信はHTTPで、ホストへの`ports`公開は不要です。
@@ -162,53 +135,24 @@ Relay Controlはコンテナの存在確認、起動、更新、Volume、環境�
 ログ確認:
 
 ```powershell
-docker compose --env-file gateway/.env -f gateway/compose.yaml logs --tail 100 traefik mc-router
+docker compose --env-file gateway/.env -f gateway/compose.yaml logs --tail 100 traefik
 ```
 
-## Minecraftルートを運用する
+## Minecraftへポート指定で直接接続する
 
-コンテナ起動後も、同じ管理コマンドでマッピングを変更できます。mc-routerが`routes.json`を監視しているため、通常はコンテナの再起動は不要です。
-
-追加または転送先更新:
-
-```powershell
-.\scripts\mc-route.ps1 set `
-  minecraft-beta.example.mydns.jp `
-  host.docker.internal:41413
-```
-
-一覧:
-
-```powershell
-.\scripts\mc-route.ps1 list
-```
-
-削除:
-
-```powershell
-.\scripts\mc-route.ps1 remove minecraft-beta.example.mydns.jp
-```
-
-変更後はログで再読み込みを確認します。
-
-```powershell
-docker compose --env-file gateway/.env -f gateway/compose.yaml logs --tail 100 mc-router
-```
-
-ファイル監視が反映されない場合に限り、mc-routerを再起動します。
-
-```powershell
-docker compose --env-file gateway/.env -f gateway/compose.yaml restart mc-router
-```
+複数のMinecraftサーバーを公開する場合は、それぞれ異なるWindowsホストポートを割り当てます。
+例えば、通常サーバーをTCP/41409、ハードコアサーバーをTCP/41411で公開します。
+mc-routerやホスト名マッピングは使用しません。
 
 Windows Defender Firewallで確認を求められた場合は、パブリックネットワーク全体ではなく、WireGuard経由で必要な受信だけを許可してください。
 
 ## 3. TerraformでOCIの公開ポートを許可する
 
-Mac側の`terraform.tfvars`へTCP/25565を追加します。Webを公開するときだけ80と443も追加します。
+Mac側の`terraform.tfvars`へゲームコンテナが公開しているTCPポートを追加します。
+次はWeb入口と2つのMinecraftサーバーを公開する例です。
 
 ```hcl
-public_tcp_ports = [25565]
+public_tcp_ports = [80, 443, 41409, 41411]
 public_udp_ports = []
 ```
 
@@ -226,17 +170,15 @@ terraform apply tfplan
 Mac側のリポジトリルートで実行します。
 
 ```bash
-./scripts/wg-relay.sh forward add minecraft \
-  --protocol tcp \
-  --listen-port 25565 \
-  --target-address 10.99.0.2 \
-  --target-port 25565
+./scripts/wg-relay.sh forward add minecraft --protocol tcp --listen-port 41409 --target-address 10.99.0.2 --target-port 41409
+./scripts/wg-relay.sh forward add minecraft-hardcore --protocol tcp --listen-port 41411 --target-address 10.99.0.2 --target-port 41411
 ```
 
-このルールは次の変換を行います。
+このルールはTraefikを経由せず、次の変換を行います。
 
 ```text
-OCI TCP/25565 → Windows TCP/25565 → Traefik → mc-router → TCP/41409または41411
+OCI TCP/41409 → WireGuard → Windows TCP/41409 → Minecraftコンテナ
+OCI TCP/41411 → WireGuard → Windows TCP/41411 → Minecraftコンテナ
 ```
 
 DNATに加えてSNATも行うため、Windowsからの返信は自宅回線ではなくWireGuardへ戻ります。代わりに、Windows側とゲームコンテナから見える接続元IPはOCIのトンネルIP`10.99.0.1`になります。
@@ -263,33 +205,21 @@ minecraft-hardcore.example.mydns.jp A  161.33.162.42
 DNS反映後、家庭内LANとは別の回線から次の2つをMinecraft Javaへ登録して確認します。
 
 ```text
-minecraft.example.mydns.jp
-minecraft-hardcore.example.mydns.jp
+minecraft.example.mydns.jp:41409
+minecraft-hardcore.example.mydns.jp:41411
 ```
 
 ## 一般的なTCP/UDPゲームを追加する
 
 新しいゲームは次の3層へ同じ公開ポートを追加します。
 
-1. Windows入口ComposeのTraefik EntryPoint
+1. ゲームコンテナのWindowsホスト公開ポート
 2. Terraformの`public_tcp_ports`または`public_udp_ports`
 3. OCIの`wg-relay forward`
 
 ### 7 Days to Dieの例
 
-`gateway/traefik/examples/7d2d.yml`を`gateway/traefik/dynamic/7d2d.yml`へコピーします。
-
-`gateway/compose.yaml`のTraefik `command`へEntryPointを追加します。
-
-```yaml
-command:
-  - --entryPoints.seven-days-to-die-tcp.address=:26900
-  - --entryPoints.seven-days-to-die-udp-main.address=:26900/udp
-  - --entryPoints.seven-days-to-die-udp-plus-1.address=:26901/udp
-  - --entryPoints.seven-days-to-die-udp-plus-2.address=:26902/udp
-```
-
-Traefikコンテナの`ports`へ追加します。
+7D2Dコンテナ自身の`ports`で必要なポートをWindowsホストへ公開します。
 
 ```yaml
 ports:
@@ -299,26 +229,10 @@ ports:
   - "0.0.0.0:26902:26902/udp"
 ```
 
-7D2Dコンテナは`onprem-relay-ingress`ネットワークへ接続し、`seven-days-to-die`というネットワークエイリアスを付けます。Traefikがホストポートを所有するため、7D2Dコンテナ自身の`ports`公開は不要です。
-
-```yaml
-services:
-  seven-days-to-die:
-    networks:
-      relay-ingress:
-        aliases:
-          - seven-days-to-die
-
-networks:
-  relay-ingress:
-    external: true
-    name: onprem-relay-ingress
-```
-
 Terraform:
 
 ```hcl
-public_tcp_ports = [25565, 26900]
+public_tcp_ports = [41409, 41411, 26900]
 public_udp_ports = [26900, 26901, 26902]
 ```
 
@@ -338,11 +252,7 @@ OCI転送:
 転送先ポートなどを変更するとき:
 
 ```bash
-./scripts/wg-relay.sh forward update minecraft \
-  --protocol tcp \
-  --listen-port 25565 \
-  --target-address 10.99.0.2 \
-  --target-port 25565
+./scripts/wg-relay.sh forward update minecraft --protocol tcp --listen-port 41409 --target-address 10.99.0.2 --target-port 41409
 ```
 
 削除:
@@ -356,7 +266,7 @@ OCIの転送を削除してもNSGは自動変更されません。不要にな�
 ## 運用上の注意
 
 - 一般的なTCP/UDPはドメイン名ではなくポートで振り分けます。
-- 同じゲームを同じ公開ポートで複数起動できるのは、mc-routerのようなプロトコル対応ルーターがある場合だけです。
+- 複数のゲームサーバーは、それぞれ異なる公開ポートへ割り当てます。
 - Docker管理画面、RCON、Telnet、管理APIは一般公開しないでください。
-- Traefikとmc-routerは入口の単一障害点になるため、`restart: unless-stopped`を設定しています。
+- TraefikはWeb入口だけを担当し、ゲーム通信は経由しません。
 - OCIのSNATにより実クライアントIPはゲームコンテナへ渡りません。

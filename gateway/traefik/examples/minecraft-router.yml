@@ -1,3 +1,5 @@
+# Disabled example. The default gateway Compose does not run mc-router or expose
+# the minecraft entryPoint. Re-enable both explicitly before using this file.
 tcp:
   routers:
     minecraft:
