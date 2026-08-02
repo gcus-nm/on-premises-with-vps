@@ -9,7 +9,6 @@ services:
       - --entryPoints.web.http.redirections.entryPoint.scheme=https
       - --entryPoints.web.http.redirections.entryPoint.permanent=true
       - --entryPoints.websecure.address=:443
-      - --entryPoints.minecraft.address=:25565
       - --entryPoints.health.address=:8082
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
@@ -24,7 +23,6 @@ services:
     ports:
       - "${GATEWAY_BIND_IP:-0.0.0.0}:80:80/tcp"
       - "${GATEWAY_BIND_IP:-0.0.0.0}:443:443/tcp"
-      - "${GATEWAY_BIND_IP:-0.0.0.0}:25565:25565/tcp"
     volumes:
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
       - traefik-certificates:/letsencrypt
@@ -42,19 +40,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  mc-router:
-    image: ${MC_ROUTER_IMAGE:-itzg/mc-router:latest}
-    environment:
-      ROUTES_CONFIG: /config/routes.json
-      ROUTES_CONFIG_WATCH: "true"
-    volumes:
-      - ./mc-router:/config:ro
-    expose:
-      - "25565"
-    networks:
-      - ingress
-    restart: unless-stopped
 
 networks:
   ingress:
