@@ -30,6 +30,8 @@ services:
       - traefik-certificates:/letsencrypt
     networks:
       - ingress
+    labels:
+      jp.mydns.gcusnm.dashboard.protected: "true"
     restart: unless-stopped
     healthcheck:
       test:
