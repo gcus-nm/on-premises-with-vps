@@ -183,6 +183,52 @@ docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml b
 docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml up -d --force-recreate
 ```
 
+## CLIとバックエンドAPI
+
+Web UIの主要な確認、経路登録、Terraform plan/apply、リレー再同期は、同じ認証・検証・
+監査を使う非対話CLIからも実行できます。API契約は[openapi.yaml](openapi.yaml)、
+全コマンドと例はCLIの`--help`で確認できます。
+
+CLIはコンテナ内で実行すると、既存の`DASHBOARD_USERNAME`と`DASHBOARD_PASSWORD`を
+環境から取得します。資格情報を引数、URL、標準出力へ含めません。
+
+```powershell
+docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml exec relay-dashboard python3 -m dashboard.cli --json state
+docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml exec relay-dashboard python3 -m dashboard.cli --json preflight
+```
+
+経路入力はJSONファイルまたは標準入力から渡します。`--dry-run`はバックエンドで入力、
+競合、変更件数を検証し、希望状態を変更しません。
+
+```json
+{
+  "name": "example-app",
+  "protocol": "tcp",
+  "public_port": 18080,
+  "target_address": "10.99.0.2",
+  "target_port": 18080,
+  "description": "Example"
+}
+```
+
+```powershell
+Get-Content -Raw .\route.json | docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml exec -T relay-dashboard python3 -m dashboard.cli --json route create --input - --dry-run
+```
+
+実際に希望状態を保存する場合は、接続先Originの明示確認と冪等性キーが必須です。
+同じキー・同じ要求を24時間以内に再試行すると、処理を重複せず保存済みの成功結果を
+返します。異なる要求へ同じキーを使うと`409 Conflict`になります。
+
+```powershell
+Get-Content -Raw .\route.json | docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml exec -T relay-dashboard python3 -m dashboard.cli --json route create --input - --confirm http://127.0.0.1:8080 --idempotency-key route-example-app-01
+docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml exec relay-dashboard python3 -m dashboard.cli --json plan
+docker compose --env-file relay-dashboard/.env -f relay-dashboard/compose.yaml exec relay-dashboard python3 -m dashboard.cli --json apply --confirm http://127.0.0.1:8080 --idempotency-key apply-example-app-01
+```
+
+成功データは標準出力、`target`、`retryable`、失敗理由を持つJSONエラーは標準エラーへ
+分離されます。Terraform成功後にリレーだけ失敗した場合は、APIの`partial`情報から成功済みと
+未完了を識別し、復旧後に`sync`コマンドを別の冪等性キーで実行します。
+
 ## 5. 最初の経路を作成する
 
 WindowsホストのTCP/41409で待ち受けるMinecraftサーバーへ直接転送する場合:

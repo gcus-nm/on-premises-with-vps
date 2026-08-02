@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from dashboard.cli import RelayClient
 from dashboard.core import ConflictError, DashboardError, Route, RouteStore
 from dashboard.server import AppContext, DashboardServer
 
@@ -59,12 +60,15 @@ class DashboardServerTests(unittest.TestCase):
         body: dict[str, object] | None = None,
         csrf: str | None = None,
         authenticated: bool = True,
+        idempotency_key: str | None = None,
     ) -> tuple[int, dict[str, object]]:
         headers = {"Accept": "application/json"}
         if authenticated:
             headers["Authorization"] = self.authorization
         if csrf is not None:
             headers["X-Relay-CSRF"] = csrf
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
         data = None
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -88,6 +92,39 @@ class DashboardServerTests(unittest.TestCase):
         status, payload = self.request("/healthz", authenticated=False)
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "ok")
+
+    def test_cli_uses_authenticated_api_and_backend_dry_run(self) -> None:
+        client = RelayClient(
+            self.base_url,
+            "admin",
+            "test-password-1234567890",
+        )
+        state = client.request("/api/state")
+        self.assertIsInstance(state, dict)
+        route = {
+            "name": "cli-route",
+            "protocol": "tcp",
+            "public_port": 18082,
+            "target_address": "10.99.0.2",
+            "target_port": 18082,
+        }
+        preview = client.request(
+            "/api/routes/validate",
+            method="POST",
+            body=route,
+        )
+        self.assertTrue(preview["dry_run"])  # type: ignore[index]
+        self.assertEqual(self.app.store.views(), [])
+
+        for _ in range(2):
+            result = client.request(
+                "/api/routes",
+                method="POST",
+                body=route,
+                idempotency_key="cli-route-create-18082",
+            )
+            self.assertEqual(len(result["routes"]), 1)  # type: ignore[arg-type]
+        self.assertEqual(len(self.app.store.views()), 1)
 
     def test_route_mutation_is_blocked_during_an_operation(self) -> None:
         _, state = self.request("/api/state")
@@ -124,6 +161,17 @@ class DashboardServerTests(unittest.TestCase):
             "target_port": 25565,
             "description": "Minecraft",
         }
+
+        preview_status, preview = self.request(
+            "/api/routes/validate",
+            method="POST",
+            body=route,
+            csrf=csrf,
+        )
+        self.assertEqual(preview_status, 200)
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["summary"]["target_count"], 1)  # type: ignore[index]
+        self.assertEqual(self.app.store.views(), [])
 
         rejected_status, _ = self.request(
             "/api/routes",
@@ -163,6 +211,37 @@ class DashboardServerTests(unittest.TestCase):
         )
         self.assertEqual(deleted_status, 200)
         self.assertEqual(deleted["routes"], [])
+
+    def test_route_create_replays_matching_idempotency_key(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        route = {
+            "name": "idempotent-route",
+            "protocol": "tcp",
+            "public_port": 18080,
+            "target_address": "10.99.0.2",
+            "target_port": 18080,
+        }
+        for _ in range(2):
+            status, response = self.request(
+                "/api/routes",
+                method="POST",
+                body=route,
+                csrf=csrf,
+                idempotency_key="route-create-18080",
+            )
+            self.assertEqual(status, 201)
+            self.assertEqual(len(response["routes"]), 1)  # type: ignore[arg-type]
+        self.assertEqual(len(self.app.store.views()), 1)
+
+        conflict_status, _ = self.request(
+            "/api/routes",
+            method="POST",
+            body={**route, "public_port": 18081},
+            csrf=csrf,
+            idempotency_key="route-create-18080",
+        )
+        self.assertEqual(conflict_status, 409)
 
     def test_web_route_api_requires_csrf_preview_and_publish_confirmation(self) -> None:
         _, state = self.request("/api/state")

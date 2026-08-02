@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import threading
 from dataclasses import asdict
@@ -19,6 +21,7 @@ from dashboard.core import (
     CommandError,
     ConflictError,
     DashboardError,
+    IdempotencyStore,
     PeerAccessRule,
     RelayManager,
     Route,
@@ -33,6 +36,13 @@ from dashboard.core import (
 
 
 MAX_REQUEST_BYTES = 64 * 1024
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+IDEMPOTENT_ENDPOINTS = {
+    ("POST", "/api/routes"),
+    ("POST", "/api/plan"),
+    ("POST", "/api/apply"),
+    ("POST", "/api/sync"),
+}
 
 
 class AppContext:
@@ -84,6 +94,7 @@ class AppContext:
             ),
         )
         self.audit = AuditLog(self.data_dir)
+        self.idempotency = IdempotencyStore(self.data_dir)
         self.relay = RelayManager(relay_script, relay_ssh_host)
         self.terraform = TerraformManager(self.workspace, self.data_dir)
         # A saved plan must not survive a container restart because its runtime
@@ -332,6 +343,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self.read_json()
+            if not self.prepare_idempotency(path, payload):
+                return
             if path == "/api/wireguard/peers":
                 if not self.acquire_operation():
                     return
@@ -514,6 +527,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self.send_web_store_state()
                 finally:
                     self.app.operation_lock.release()
+                return
+            if path == "/api/routes/validate":
+                route = self.app.route_from_payload(payload)
+                group_value = payload.get("group_id")
+                group_id = str(group_value) if group_value else None
+                summary = self.app.store.validate_create(
+                    route,
+                    group_id=group_id,
+                    desired_enabled=payload.get("desired_enabled", True),  # type: ignore[arg-type]
+                )
+                self.send_json({"ok": True, "dry_run": True, "summary": summary})
                 return
             if path == "/api/routes":
                 if not self.acquire_operation():
@@ -1057,6 +1081,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_error_json(HTTPStatus.CONFLICT, "別の操作を実行中です。")
         return False
 
+    def prepare_idempotency(
+        self,
+        path: str,
+        payload: dict[str, object],
+    ) -> bool:
+        key = self.headers.get("Idempotency-Key", "")
+        if not key:
+            return True
+        endpoint = (self.command, path)
+        if endpoint not in IDEMPOTENT_ENDPOINTS:
+            raise ValidationError("このAPIは冪等性キーに対応していません。")
+        if not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
+            raise ValidationError(
+                "冪等性キーは英数字と._:-を使った8〜128文字にしてください。"
+            )
+        scope = f"{self.command} {path}"
+        request_hash = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        replay = self.app.idempotency.replay(key, scope, request_hash)
+        if replay is not None:
+            status, response = replay
+            self._idempotency_replayed = True
+            self.send_json(response, HTTPStatus(status))
+            return False
+        self._idempotency_pending = (key, scope, request_hash)
+        return True
+
     def authenticate(self) -> bool:
         header = self.headers.get("Authorization", "")
         if not header.startswith("Basic "):
@@ -1128,9 +1185,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
+        pending = getattr(self, "_idempotency_pending", None)
+        if pending is not None and 200 <= int(status) < 300:
+            key, scope, request_hash = pending
+            self.app.idempotency.save(
+                key,
+                scope,
+                request_hash,
+                int(status),
+                payload,
+            )
+            self._idempotency_pending = None
         body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.security_headers()
+        if getattr(self, "_idempotency_replayed", False):
+            self.send_header("Idempotency-Replayed", "true")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
