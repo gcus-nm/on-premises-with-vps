@@ -113,6 +113,7 @@ const elements = {
   groupFormError: document.querySelector("#group-form-error"),
   planDialog: document.querySelector("#plan-dialog"),
   planSummary: document.querySelector("#plan-summary"),
+  relayAdoptions: document.querySelector("#relay-adoptions"),
   unexpected: document.querySelector("#unexpected-changes"),
   planOutput: document.querySelector("#plan-output"),
   planError: document.querySelector("#plan-error"),
@@ -1475,6 +1476,7 @@ async function createPlan() {
 
 function showPlan(plan) {
   const counts = plan.counts || {};
+  const relayAdoptions = plan.relay_adoptions || [];
   const labels = [
     ["追加", counts.create || 0],
     ["更新", counts.update || 0],
@@ -1488,6 +1490,25 @@ function showPlan(plan) {
       `,
     )
     .join("");
+  elements.relayAdoptions.hidden = relayAdoptions.length === 0;
+  elements.relayAdoptions.innerHTML = relayAdoptions.length
+    ? `
+      <strong>一致する手動リレールールをOCI Controlへ移管します。</strong>
+      <ul>
+        ${relayAdoptions
+          .map(
+            (adoption) => `
+              <li>
+                ${escapeHtml(adoption.manual_name)} → ${escapeHtml(adoption.managed_name)}
+                （${escapeHtml(String(adoption.protocol || "").toUpperCase())}/${adoption.public_port}
+                → ${escapeHtml(adoption.target_address)}:${adoption.target_port}）
+              </li>
+            `,
+          )
+          .join("")}
+      </ul>
+    `
+    : "";
   elements.planOutput.textContent = plan.output || "plan出力はありません。";
   elements.planError.textContent = "";
   elements.applyConfirmation.value = "";

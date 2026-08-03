@@ -79,6 +79,17 @@ class RouteDialogMarkupTests(unittest.TestCase):
         self.assertIn('id="group-dialog"', html)
         self.assertIn('id="group-parent"', html)
         self.assertIn('id="route-advanced"', html)
+        self.assertIn('id="relay-adoptions"', html)
+        self.assertIn("手動リレールールをOCI Controlへ移管", javascript)
+
+    def test_group_name_is_visually_prioritized_over_route_name(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        styles = (project_root / "relay-dashboard/static/styles.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(".group-identity strong {\n  font-size: 18px;\n}", styles)
+        self.assertIn("font-size: 14px;\n  text-overflow: ellipsis;", styles)
 
     def test_wireguard_peer_and_access_management_are_present(self) -> None:
         project_root = Path(__file__).resolve().parents[2]

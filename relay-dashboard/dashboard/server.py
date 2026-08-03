@@ -949,7 +949,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             conflicts = self.app.relay.check_conflicts(routes, actual)
             if conflicts:
                 raise ConflictError(" ".join(conflicts))
-            metadata = self.app.terraform.plan(routes)
+            relay_adoptions = self.app.relay.adoptions(routes, actual)
+            metadata = self.app.terraform.plan(
+                routes,
+                relay_adoptions=relay_adoptions,
+            )
             result = "success" if metadata.get("safe") else "blocked"
             self.app.audit.append(
                 "terraform-plan",
@@ -975,6 +979,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             routes = self.app.store.list()
+            actual = self.app.relay.list()
+            conflicts = self.app.relay.check_conflicts(routes, actual)
+            if conflicts:
+                raise ConflictError(" ".join(conflicts))
+            current_adoptions = self.app.relay.adoptions(routes, actual)
+            plan_metadata = self.app.terraform.load_plan_metadata() or {}
+            if plan_metadata.get("relay_adoptions", []) != current_adoptions:
+                raise ConflictError(
+                    "手動リレールールの移管対象がplan作成後に変わりました。"
+                    "変更内容を確認し直してください。"
+                )
             terraform_output = self.app.terraform.apply(routes)
             self.app.store.mark_terraform_applied()
             try:

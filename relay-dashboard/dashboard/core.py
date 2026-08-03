@@ -2660,6 +2660,12 @@ class RelayManager:
         desired = validate_route_set(desired_routes)
         conflicts: list[str] = []
         for route in desired:
+            desired_signature = (
+                route.protocol,
+                route.public_port,
+                route.target_address,
+                route.target_port,
+            )
             for existing in actual.values():
                 if existing.name.startswith(MANAGED_ROUTE_PREFIX):
                     continue
@@ -2667,11 +2673,49 @@ class RelayManager:
                     existing.protocol == route.protocol
                     and existing.public_port == route.public_port
                 ):
+                    if existing.signature == desired_signature:
+                        continue
                     conflicts.append(
                         f"{route.protocol.upper()}/{route.public_port}は"
                         f"手動ルール「{existing.name}」で使用されています。"
                     )
         return conflicts
+
+    def adoptions(
+        self,
+        desired_routes: Iterable[Route],
+        actual_routes: dict[str, RelayRoute] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return manual relay rules that can be safely adopted as GUI rules."""
+        actual = actual_routes if actual_routes is not None else self.list()
+        desired = validate_route_set(desired_routes)
+        desired_by_signature = {
+            (
+                route.protocol,
+                route.public_port,
+                route.target_address,
+                route.target_port,
+            ): route
+            for route in desired
+        }
+        adoptions: list[dict[str, Any]] = []
+        for existing in sorted(actual.values(), key=lambda item: item.name):
+            if existing.name.startswith(MANAGED_ROUTE_PREFIX):
+                continue
+            route = desired_by_signature.get(existing.signature)
+            if route is None:
+                continue
+            adoptions.append(
+                {
+                    "manual_name": existing.name,
+                    "managed_name": route.remote_name,
+                    "protocol": route.protocol,
+                    "public_port": route.public_port,
+                    "target_address": route.target_address,
+                    "target_port": route.target_port,
+                }
+            )
+        return adoptions
 
     def sync(self, desired_routes: Iterable[Route]) -> list[str]:
         desired = validate_route_set(desired_routes)
@@ -2679,6 +2723,7 @@ class RelayManager:
         conflicts = self.check_conflicts(desired, actual)
         if conflicts:
             raise ConflictError(" ".join(conflicts))
+        adoptions = self.adoptions(desired, actual)
 
         desired_by_name = {route.remote_name: route for route in desired}
         managed_actual = {
@@ -2701,6 +2746,17 @@ class RelayManager:
             if desired_signature != existing.signature:
                 self._run(["forward", "delete", name, "--yes"])
                 actions.append(f"削除: {name}")
+
+        # An exact signature match is an explicit handover request: replace the
+        # manual rule with an equivalent ui-* rule so subsequent toggles and
+        # edits are controlled by the dashboard. Non-matching manual listeners
+        # remain protected by check_conflicts().
+        for adoption in adoptions:
+            manual_name = str(adoption["manual_name"])
+            self._run(["forward", "delete", manual_name, "--yes"])
+            actions.append(
+                f"移管: {manual_name} → {adoption['managed_name']}"
+            )
 
         for name, route in sorted(desired_by_name.items()):
             existing = managed_actual.get(name)
@@ -2828,8 +2884,13 @@ class TerraformManager:
         }
         atomic_write_json(self.var_file, payload, mode=0o600)
 
-    def plan(self, routes: Iterable[Route]) -> dict[str, Any]:
+    def plan(
+        self,
+        routes: Iterable[Route],
+        relay_adoptions: Iterable[dict[str, Any]] = (),
+    ) -> dict[str, Any]:
         validated = validate_route_set(routes)
+        adoption_metadata = list(relay_adoptions)
         self.prepare_workspace()
         self.write_var_file(validated)
         self._run(["init", "-input=false", "-no-color"])
@@ -2858,6 +2919,7 @@ class TerraformManager:
             "safe": analysis["safe"],
             "unexpected": analysis["unexpected"],
             "counts": analysis["counts"],
+            "relay_adoptions": adoption_metadata,
             "output": truncate_text(plan_result.output, 160_000),
         }
         atomic_write_json(self.plan_meta_file, metadata, mode=0o600)
