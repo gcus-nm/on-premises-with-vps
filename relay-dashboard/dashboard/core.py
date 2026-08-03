@@ -775,6 +775,40 @@ class RouteStore:
             self._save(records, groups, pending_relay)
             return record
 
+    def validate_create(
+        self,
+        route: Route,
+        group_id: str | None = None,
+        desired_enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Validate a prospective route without changing desired state."""
+        with self.lock:
+            records, groups, pending_relay = self._load()
+            self._require_mutable(pending_relay)
+            self._validate_group_reference(groups, group_id)
+            if not isinstance(desired_enabled, bool):
+                raise ValidationError("有効状態はtrueまたはfalseで指定してください。")
+            now = utc_now()
+            candidate = RouteRecord(
+                id="dry-run",
+                route=route,
+                applied_route=None,
+                desired_active=True,
+                group_id=group_id,
+                desired_enabled=desired_enabled,
+                applied_enabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+            self._validate_records([*records, candidate], groups)
+            return {
+                "action": "create",
+                "target_count": 1,
+                "route": asdict(route),
+                "group_id": group_id,
+                "desired_enabled": desired_enabled,
+            }
+
     def update(
         self,
         record_id: str,
@@ -2333,6 +2367,70 @@ class AuditLog:
             return [json.loads(line) for line in reversed(lines)]
         except (OSError, json.JSONDecodeError):
             return []
+
+
+class IdempotencyStore:
+    """Persist replayable, non-secret API results for 24 hours."""
+
+    def __init__(self, data_dir: Path) -> None:
+        self.path = data_dir / "idempotency.json"
+        self.lock = threading.RLock()
+
+    def replay(
+        self,
+        key: str,
+        scope: str,
+        request_hash: str,
+    ) -> tuple[int, object] | None:
+        with self.lock:
+            records = self._load()
+            existing = records.get(hashlib.sha256(key.encode()).hexdigest())
+            if existing is None:
+                return None
+            if (
+                existing.get("scope") != scope
+                or existing.get("request_hash") != request_hash
+            ):
+                raise ConflictError(
+                    "同じ冪等性キーが異なる操作に使用されています。"
+                )
+            return int(existing["status"]), existing["response"]
+
+    def save(
+        self,
+        key: str,
+        scope: str,
+        request_hash: str,
+        status: int,
+        response: object,
+    ) -> None:
+        with self.lock:
+            records = self._load()
+            records[hashlib.sha256(key.encode()).hexdigest()] = {
+                "scope": scope,
+                "request_hash": request_hash,
+                "status": status,
+                "response": response,
+                "created_at": utc_now(),
+            }
+            atomic_write_json(self.path, {"version": 1, "records": records}, mode=0o600)
+
+    def _load(self) -> dict[str, dict[str, Any]]:
+        if not self.path.exists():
+            return {}
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            if value.get("version") != 1 or not isinstance(value.get("records"), dict):
+                raise ValueError("unsupported idempotency data")
+            cutoff = datetime.now(UTC).timestamp() - 86_400
+            return {
+                str(key): record
+                for key, record in value["records"].items()
+                if isinstance(record, dict)
+                and datetime.fromisoformat(str(record.get("created_at"))).timestamp() >= cutoff
+            }
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise DashboardError(f"冪等性データを読み込めません: {exc}") from exc
 
 
 Runner = Callable[[list[str], dict[str, str], Path | None, int], CommandResult]
