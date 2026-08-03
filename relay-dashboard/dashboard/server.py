@@ -70,7 +70,7 @@ class AppContext:
             "10.99.0.2",
         )
         self.dashboard_external_port = int(
-            os.environ.get("DASHBOARD_EXTERNAL_PORT", "41800")
+            os.environ.get("DASHBOARD_EXTERNAL_PORT", "8081")
         )
         if not 1 <= self.dashboard_external_port <= 65535:
             raise RuntimeError("DASHBOARD_EXTERNAL_PORT must be between 1 and 65535")

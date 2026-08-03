@@ -902,12 +902,12 @@ class WireGuardManagementTests(unittest.TestCase):
         )
         rules = parse_peer_access_rules(
             "NAME\tPROTOCOL\tSOURCE\tTARGET\n"
-            "mac-to-dashboard\ttcp\t10.99.0.3\t10.99.0.2:41800\n"
+            "mac-to-dashboard\ttcp\t10.99.0.3\t10.99.0.2:8081\n"
         )
 
         self.assertEqual(peers["windows-minibox"].address, "10.99.0.2")
         self.assertEqual(statuses["mac-key"]["latest_handshake"], "42 seconds ago")
-        self.assertEqual(rules["mac-to-dashboard"].target_port, 41800)
+        self.assertEqual(rules["mac-to-dashboard"].target_port, 8081)
 
     def test_validates_and_suggests_peer_addresses(self) -> None:
         peers = [
@@ -934,11 +934,11 @@ class WireGuardManagementTests(unittest.TestCase):
                 "protocol": "TCP",
                 "source_address": "10.99.0.3",
                 "target_address": "10.99.0.2",
-                "target_port": "41800",
+                "target_port": "8081",
             }
         )
         self.assertEqual(rule.protocol, "tcp")
-        self.assertEqual(rule.target_port, 41800)
+        self.assertEqual(rule.target_port, 8081)
 
         with self.assertRaises(ValidationError):
             PeerAccessRule.from_mapping(
@@ -947,7 +947,7 @@ class WireGuardManagementTests(unittest.TestCase):
                     "protocol": "tcp",
                     "source_address": "10.99.0.3",
                     "target_address": "10.99.0.3",
-                    "target_port": 41800,
+                    "target_port": 8081,
                 }
             )
 
@@ -989,7 +989,7 @@ class WireGuardManagementTests(unittest.TestCase):
             "tcp",
             "10.99.0.4",
             "10.99.0.2",
-            41800,
+            8081,
         )
         manager.create_peer_access_rule(rule)
         manager.update_peer_access_rule(rule)
@@ -1022,7 +1022,7 @@ class WireGuardManagementTests(unittest.TestCase):
                 "--target-address",
                 "10.99.0.2",
                 "--target-port",
-                "41800",
+                "8081",
             ],
             commands,
         )

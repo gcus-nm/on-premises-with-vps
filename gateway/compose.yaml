@@ -8,6 +8,7 @@ services:
       - --entryPoints.web.http.redirections.entryPoint.to=websecure
       - --entryPoints.web.http.redirections.entryPoint.scheme=https
       - --entryPoints.web.http.redirections.entryPoint.permanent=true
+      - --entryPoints.web.http.redirections.entryPoint.priority=1
       - --entryPoints.websecure.address=:443
       - --entryPoints.health.address=:8082
       - --providers.file.directory=/etc/traefik/dynamic

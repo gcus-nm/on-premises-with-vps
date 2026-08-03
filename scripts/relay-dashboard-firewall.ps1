@@ -7,7 +7,7 @@ param(
     [string]$MiniPcAddress = "10.99.0.2",
     [string[]]$DashboardClientAddress = @(),
     [ValidateRange(1, 65535)]
-    [int]$DashboardPort = 41800
+    [int]$DashboardPort = 8081
 )
 
 $ErrorActionPreference = "Stop"

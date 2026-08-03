@@ -12,7 +12,8 @@ OCI Network Security Group
 OCI wg-relay（DNAT + SNAT）
   ↓ WireGuard
 Windows 10.99.0.2
-  ├─ TCP/80・443 → Traefik → Webコンテナ
+  ├─ TCP/80（IP直アクセス）→ Traefik → VPN管理ハブ
+  ├─ TCP/80・443（公開FQDN）→ Traefik → Webコンテナ
   └─ ゲーム固有ポート → 各ゲームコンテナ
 ```
 
@@ -28,6 +29,9 @@ WebはTraefikがHTTPSのHTTP Host名で振り分け、TCP/80へのアクセス�
 
 - TCP/80: Let's Encrypt HTTP-01とHTTPSリダイレクト
 - TCP/443: HTTPS Web用Traefik EntryPoint
+
+WireGuard内から`http://10.99.0.2`へIPアドレスでアクセスした場合だけ、TCP/80は
+VPN管理ハブへ振り分けます。公開FQDNへのHTTPアクセスは従来どおりHTTPSへ転送します。
 
 ゲーム用ポートは`gateway/compose.yaml`で公開しません。各ゲームコンテナの`ports`と、
 OCI NSG・`wg-relay forward`で管理します。
@@ -95,6 +99,47 @@ docker volume inspect onprem-relay-traefik-certificates
 Volumeを削除すると証明書を再取得するため、Let's Encryptのレート制限に達する可能性が
 あります。破損時の初期化が必要な場合だけ、Traefikを停止し、Volume名を再確認したうえで
 手動削除してください。
+
+## VPN管理ハブを開く
+
+WireGuardへ接続した管理端末で次を開きます。ハブ自身はHTTPですが、通信経路は
+WireGuardで暗号化されます。
+
+```text
+http://10.99.0.2
+```
+
+管理端末のWireGuard Peerには、MiniPCの`10.99.0.2`に対するTCP/80のPeer間アクセス許可が
+必要です。OCI Relay ControlのWireGuard画面で対象Peerの「アクセス追加」を開き、接続先を
+`10.99.0.2`、プロトコルをTCP、ポートを`80`として追加します。現在の`mac-admin`
+（`10.99.0.3`）には`mac-to-admin-hub`として設定済みです。
+
+初期状態では次の管理画面をカードから開けます。
+
+| 管理画面 | 接続先 |
+| --- | --- |
+| OCI Relay Control | `http://10.99.0.2:8081` |
+| Docker Dashboard | `https://10.99.0.2:8082` |
+
+Docker Dashboardはプライベート管理入口用の自己署名証明書を使用するため、証明書をまだ
+信頼していない端末では初回に警告が表示されます。ハブは認証情報やアクセストークンを
+保存せず、それぞれの管理画面が持つ既存の認証をそのまま利用します。
+
+管理ハブは`C:\Develop\admin-hub`の独立プロジェクトとして稼働します。Gatewayを先に起動して
+`onprem-relay-ingress`ネットワークを作成してから、管理ハブを起動します。
+
+```powershell
+Set-Location C:\Develop\admin-hub
+docker compose config --quiet
+docker compose build
+docker compose up -d
+```
+
+カードを追加・変更するときは`C:\Develop\admin-hub\static\services.json`を編集し、同じ
+ディレクトリで`docker compose build`と`docker compose up -d`を実行します。
+`id`、`name`、`description`、`url`、`accessLabel`をすべて指定します。ハブはホストへ
+独自ポートを公開せず、Traefikと同じ`onprem-relay-ingress`ネットワークからだけ配信します。
+Docker socket、管理API資格情報、各サービスの秘密情報は渡しません。
 
 ## WebサービスをRelay Controlから登録する
 

@@ -21,7 +21,7 @@ const appState = {
   suggestedPeerAddress: "",
   relayNetwork: "10.99.0.0/24",
   dashboardTargetAddress: "10.99.0.2",
-  dashboardPort: 41800,
+  dashboardPort: 8081,
   wireguardLoading: true,
   wireguardError: "",
 };

@@ -1,0 +1,13 @@
+http:
+  routers:
+    admin-hub:
+      entryPoints:
+        - web
+      rule: "Host(`10.99.0.2`)"
+      priority: 100
+      service: admin-hub
+  services:
+    admin-hub:
+      loadBalancer:
+        servers:
+          - url: "http://admin-hub:8080"

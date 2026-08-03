@@ -43,6 +43,11 @@ Relay ControlからHTTPSの`ドメイン → Dockerサービス:ポート`と、
 
 OCI公開ポートとWireGuard転送経路をブラウザから管理する場合は[OCI Relay Control](relay-dashboard/README.md)を使用できます。MiniPCのDocker Desktop上で動作し、安全性を検査したTerraform planを確認してから適用します。
 
+WireGuard内の管理画面をポート番号なしで開く場合は、`http://10.99.0.2`の
+[VPN管理ハブ](GATEWAY.md#vpn管理ハブを開く)を使用します。OCI Relay Controlと
+Docker Dashboardのプライベート管理入口をカードから開けます。管理ハブ本体は
+`C:\Develop\admin-hub`の独立プロジェクトで管理します。
+
 VM内部を週次バックアップし、障害時に復旧する手順は[OCIブートボリュームのバックアップと復旧](BACKUP.md)を参照してください。
 
 MyDNS.JPのChild IDを使ってOCIの予約済みIPv4をサブドメインへ定期通知する場合は、
