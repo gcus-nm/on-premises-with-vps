@@ -659,10 +659,26 @@ td.description-cell {
 .single-routes-heading strong {
   display: block;
   margin-bottom: 4px;
+}
+
+.group-identity strong {
+  font-size: 18px;
+}
+
+.single-routes-heading strong {
   font-size: 14px;
 }
 
-.group-identity small,
+.group-identity small {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .group-port-summary,
 .group-summary-meta small,
 .single-routes-heading small {
@@ -748,6 +764,7 @@ td.description-cell {
 .route-main .route-name {
   display: block;
   overflow: hidden;
+  font-size: 14px;
   text-overflow: ellipsis;
 }
 
@@ -1365,6 +1382,7 @@ dialog::backdrop {
 .confirm-zone,
 #info-content,
 .plan-summary,
+.notice-box,
 .danger-box,
 dialog details,
 .form-error,
@@ -1476,6 +1494,26 @@ select:focus {
   color: #ffc2c8;
   font-size: 11px;
   line-height: 1.7;
+}
+
+.notice-box {
+  margin-top: 15px;
+  padding: 16px;
+  border: 1px solid rgb(119 216 239 / 38%);
+  border-radius: 8px;
+  background: rgb(119 216 239 / 7%);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.notice-box strong {
+  color: var(--cyan);
+}
+
+.notice-box ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
 }
 
 dialog details {

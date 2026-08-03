@@ -778,9 +778,10 @@ class RelayParsingTests(unittest.TestCase):
         manager = RelayManager(Path("/workspace/scripts/wg-relay.sh"), "oci-relay", runner)
         actions = manager.sync([route(target_port=25565)])
         self.assertTrue(commands)
+        expected_script = str(Path("/workspace/scripts/wg-relay.sh"))
         self.assertTrue(
             all(
-                command[:2] == ["bash", "/workspace/scripts/wg-relay.sh"]
+                command[:2] == ["bash", expected_script]
                 for command in commands
             )
         )
@@ -813,11 +814,76 @@ class RelayParsingTests(unittest.TestCase):
         manager = RelayManager(Path("/workspace/scripts/wg-relay.sh"), "oci-relay")
         actual = parse_relay_routes(
             "NAME\tPROTOCOL\tPUBLIC_PORT\tTARGET\n"
-            "manual-minecraft\ttcp\t25565\t10.99.0.2:25565\n"
+            "manual-minecraft\ttcp\t25565\t10.99.0.2:41409\n"
         )
         conflicts = manager.check_conflicts([route()], actual)
         self.assertEqual(len(conflicts), 1)
         self.assertIn("manual-minecraft", conflicts[0])
+
+    def test_adopts_exact_manual_listener_match(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(
+            command: list[str],
+            environment: dict[str, str],
+            cwd: Path | None,
+            timeout: int,
+        ) -> CommandResult:
+            commands.append(command)
+            if command[-2:] == ["forward", "list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tPROTOCOL\tPUBLIC_PORT\tTARGET\n"
+                    "minecraft\ttcp\t25565\t10.99.0.2:25565\n",
+                    "",
+                )
+            return CommandResult(0, "", "")
+
+        manager = RelayManager(
+            Path("/workspace/scripts/wg-relay.sh"),
+            "oci-relay",
+            runner,
+        )
+        actual = manager.list()
+
+        self.assertEqual(manager.check_conflicts([route()], actual), [])
+        self.assertEqual(
+            manager.adoptions([route()], actual),
+            [
+                {
+                    "manual_name": "minecraft",
+                    "managed_name": "ui-minecraft",
+                    "protocol": "tcp",
+                    "public_port": 25565,
+                    "target_address": "10.99.0.2",
+                    "target_port": 25565,
+                }
+            ],
+        )
+
+        actions = manager.sync([route()])
+        command_arguments = [item[2:] for item in commands]
+        self.assertIn(
+            ["forward", "delete", "minecraft", "--yes"],
+            command_arguments,
+        )
+        self.assertIn(
+            [
+                "forward",
+                "add",
+                "ui-minecraft",
+                "--protocol",
+                "tcp",
+                "--listen-port",
+                "25565",
+                "--target-address",
+                "10.99.0.2",
+                "--target-port",
+                "25565",
+            ],
+            command_arguments,
+        )
+        self.assertIn("移管: minecraft → ui-minecraft", actions)
 
 
 class WireGuardManagementTests(unittest.TestCase):

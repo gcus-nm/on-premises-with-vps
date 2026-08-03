@@ -12,7 +12,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from dashboard.cli import RelayClient
-from dashboard.core import ConflictError, DashboardError, Route, RouteStore
+from dashboard.core import (
+    ConflictError,
+    DashboardError,
+    Route,
+    RouteStore,
+    parse_relay_routes,
+)
 from dashboard.server import AppContext, DashboardServer
 
 
@@ -242,6 +248,91 @@ class DashboardServerTests(unittest.TestCase):
             idempotency_key="route-create-18080",
         )
         self.assertEqual(conflict_status, 409)
+
+    def test_plan_reports_exact_manual_rule_adoption(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        self.app.store.create(
+            Route.from_mapping(
+                {
+                    "name": "minecraft-26-2-vanilla",
+                    "protocol": "tcp",
+                    "public_port": 25565,
+                    "target_address": "10.99.0.2",
+                    "target_port": 25565,
+                }
+            )
+        )
+        self.app.relay.list = Mock(  # type: ignore[method-assign]
+            return_value=parse_relay_routes(
+                "NAME\tPROTOCOL\tPUBLIC_PORT\tTARGET\n"
+                "minecraft\ttcp\t25565\t10.99.0.2:25565\n"
+            )
+        )
+
+        def plan_result(
+            routes: list[Route],
+            relay_adoptions: list[dict[str, object]],
+        ) -> dict[str, object]:
+            return {
+                "safe": True,
+                "counts": {"create": 1},
+                "relay_adoptions": relay_adoptions,
+                "output": "safe plan",
+            }
+
+        self.app.terraform.plan = Mock(side_effect=plan_result)  # type: ignore[method-assign]
+
+        status, payload = self.request(
+            "/api/plan",
+            method="POST",
+            body={},
+            csrf=csrf,
+        )
+
+        self.assertEqual(status, 200)
+        adoptions = payload["plan"]["relay_adoptions"]  # type: ignore[index]
+        self.assertEqual(adoptions[0]["manual_name"], "minecraft")  # type: ignore[index]
+        self.assertEqual(
+            adoptions[0]["managed_name"],  # type: ignore[index]
+            "ui-minecraft-26-2-vanilla",
+        )
+
+    def test_apply_rejects_manual_rule_change_after_plan(self) -> None:
+        _, state = self.request("/api/state")
+        csrf = str(state["csrf_token"])
+        self.app.store.create(
+            Route.from_mapping(
+                {
+                    "name": "minecraft",
+                    "protocol": "tcp",
+                    "public_port": 25565,
+                    "target_address": "10.99.0.2",
+                    "target_port": 25565,
+                }
+            )
+        )
+        self.app.relay.list = Mock(  # type: ignore[method-assign]
+            return_value=parse_relay_routes(
+                "NAME\tPROTOCOL\tPUBLIC_PORT\tTARGET\n"
+                "minecraft\ttcp\t25565\t10.99.0.2:25565\n"
+            )
+        )
+        self.app.terraform.load_plan_metadata = Mock(  # type: ignore[method-assign]
+            return_value={"relay_adoptions": []}
+        )
+        self.app.terraform.apply = Mock()  # type: ignore[method-assign]
+
+        status, payload = self.request(
+            "/api/apply",
+            method="POST",
+            body={"confirmation": "APPLY"},
+            csrf=csrf,
+        )
+
+        self.assertEqual(status, 502)
+        self.assertIn("移管対象がplan作成後に変わりました", payload["message"])
+        self.app.terraform.apply.assert_not_called()
 
     def test_web_route_api_requires_csrf_preview_and_publish_confirmation(self) -> None:
         _, state = self.request("/api/state")
@@ -639,6 +730,10 @@ class DashboardServerTests(unittest.TestCase):
         self.app.store.create(self.app.route_from_payload(route_payload))
         self.app.terraform.apply = Mock(return_value="terraform applied")  # type: ignore[method-assign]
         self.app.terraform.invalidate_plan = Mock()  # type: ignore[method-assign]
+        self.app.terraform.load_plan_metadata = Mock(  # type: ignore[method-assign]
+            return_value={"relay_adoptions": []}
+        )
+        self.app.relay.list = Mock(return_value={})  # type: ignore[method-assign]
         self.app.relay.sync = Mock(  # type: ignore[method-assign]
             side_effect=DashboardError("relay unavailable")
         )
