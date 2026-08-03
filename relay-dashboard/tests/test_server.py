@@ -544,7 +544,7 @@ class DashboardServerTests(unittest.TestCase):
             "relay_network": "10.99.0.0/24",
             "relay_address": "10.99.0.1",
             "dashboard_target_address": "10.99.0.2",
-            "dashboard_port": 41800,
+            "dashboard_port": 8081,
         }
         self.app.relay.wireguard_state = Mock(return_value=inventory)  # type: ignore[method-assign]
         status, payload = self.request("/api/wireguard")
@@ -592,7 +592,7 @@ class DashboardServerTests(unittest.TestCase):
             "protocol": "tcp",
             "source_address": "10.99.0.3",
             "target_address": "10.99.0.2",
-            "target_port": 41800,
+            "target_port": 8081,
         }
         status, _ = self.request(
             "/api/wireguard/access-rules",
@@ -602,7 +602,7 @@ class DashboardServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 201)
         created_rule = self.app.relay.create_peer_access_rule.call_args.args[0]
-        self.assertEqual(created_rule.target_port, 41800)
+        self.assertEqual(created_rule.target_port, 8081)
 
         self.app.relay.update_peer_access_rule = Mock()  # type: ignore[method-assign]
         status, _ = self.request(

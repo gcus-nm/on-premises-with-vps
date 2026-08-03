@@ -17,8 +17,8 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 
 このコンテナはTerraformとOCIリレーを操作できる強い権限を持ちます。
 
-- 既定では`127.0.0.1:41800`だけで待ち受ける
-- WireGuard経由で公開する場合も、WindowsではWireGuardサブネットとTCP/41800だけを許可する
+- 既定では`127.0.0.1:8081`だけで待ち受ける
+- WireGuard経由で公開する場合も、WindowsではWireGuardサブネットとTCP/8081だけを許可する
 - Web UIへ到達できるPeerはOCIのPeer間アクセスルールで個別に制御する
 - HTTP Basic認証を必須にする
 - 状態変更APIへCSRFトークンを要求する
@@ -172,7 +172,7 @@ docker compose `
 ブラウザで次を開きます。
 
 ```text
-http://127.0.0.1:41800
+http://127.0.0.1:8081
 ```
 
 ユーザー名とパスワードは`relay-dashboard/.env`で確認できます。
@@ -405,7 +405,7 @@ Peer一覧では、WireGuardアドレス、Endpoint、最新ハンドシェイ�
 秘密鍵は保存されません。紛失時は「鍵を更新」で既存鍵を失効させて再発行します。
 
 Peerカードの「アクセス追加」では、接続元、接続先、TCP/UDP、接続先ポートを指定します。
-Web UIアクセスの場合はMiniPCの`10.99.0.2`とTCP/41800が自動入力されます。
+Web UIアクセスの場合はMiniPCの`10.99.0.2`とTCP/8081が自動入力されます。
 RDPなど任意のPeer間ルールも同じ画面で追加・編集・削除できます。
 
 Peerを削除する前に、そのPeerを参照しているアクセスルールをすべて削除してください。
@@ -415,7 +415,7 @@ OCI側も参照中Peerの削除を拒否します。
 
 Web UI自身へ初めて接続する経路だけは、Web UIを利用する前に一度だけ設定します。
 管理画面を動かすMiniPCを`10.99.0.2`、最初の管理端末を`10.99.0.3`、
-管理画面ポートを`41800`とします。
+管理画面ポートを`8081`とします。
 
 MiniPCの`relay-dashboard/.env`で、公開先をMiniPCのWireGuardアドレスへ変更します。
 `0.0.0.0`はLAN側でも待ち受けるため使用しません。
@@ -424,7 +424,7 @@ MiniPCの`relay-dashboard/.env`で、公開先をMiniPCのWireGuardアドレス�
 RELAY_DASHBOARD_BIND_IP=10.99.0.2
 ```
 
-Windows Firewallは管理画面のローカルアドレスとTCP/41800をWireGuardサブネットだけへ
+Windows Firewallは管理画面のローカルアドレスとTCP/8081をWireGuardサブネットだけへ
 一度許可します。個々のPeerを許可するかどうかはOCI側のアクセスルールで制御します。
 
 ```powershell
@@ -437,7 +437,7 @@ Windows Firewallは管理画面のローカルアドレスとTCP/41800をWireGua
 存在しない場合だけ追加してください。
 
 ```bash
-./scripts/wg-relay.sh peer-forward add mac-to-relay-dashboard --protocol tcp --source-address 10.99.0.3 --target-address 10.99.0.2 --target-port 41800
+./scripts/wg-relay.sh peer-forward add mac-to-relay-dashboard --protocol tcp --source-address 10.99.0.3 --target-address 10.99.0.2 --target-port 8081
 ```
 
 以後のPeer追加とWeb UIアクセス許可は管理画面から実行できます。コンテナを再作成した後、
@@ -448,17 +448,17 @@ WireGuard接続中の許可済みPeerから次を開きます。
 ```
 
 ```text
-http://10.99.0.2:41800
+http://10.99.0.2:8081
 ```
 
 接続できない場合はWindowsでローカル応答を確認します。
 
 ```powershell
-Test-NetConnection 10.99.0.2 -Port 41800
+Test-NetConnection 10.99.0.2 -Port 8081
 ```
 
 HTTP Basic認証の内容はWireGuardトンネルで暗号化されます。OCI NSG、自宅ルーター、
-LAN側アドレスではTCP/41800を公開しないでください。
+LAN側アドレスではTCP/8081を公開しないでください。
 
 ## 停止とデータ
 

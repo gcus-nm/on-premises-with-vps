@@ -42,7 +42,7 @@ class PowerShellCompatibilityTests(unittest.TestCase):
         ).read_text(encoding="utf-8-sig")
 
         self.assertIn("[string[]]$DashboardClientAddress = @()", content)
-        self.assertIn("[int]$DashboardPort = 41800", content)
+        self.assertIn("[int]$DashboardPort = 8081", content)
         self.assertIn("-Protocol TCP `", content)
         self.assertIn("-LocalAddress $MiniPcAddress `", content)
         self.assertIn("-LocalPort $DashboardPort `", content)

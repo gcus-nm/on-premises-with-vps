@@ -4,7 +4,7 @@ info:
   version: 1.1.0
   description: Private API shared by the Web UI and non-interactive CLI.
 servers:
-  - url: http://127.0.0.1:41800
+  - url: http://127.0.0.1:8081
 security:
   - basicAuth: []
 paths:

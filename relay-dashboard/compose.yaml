@@ -13,10 +13,10 @@ services:
       RELAY_NETWORK: ${RELAY_NETWORK:-10.99.0.0/24}
       RELAY_ADDRESS: ${RELAY_ADDRESS:-10.99.0.1}
       DASHBOARD_WIREGUARD_TARGET: ${RELAY_DASHBOARD_WIREGUARD_TARGET:-10.99.0.2}
-      DASHBOARD_EXTERNAL_PORT: ${RELAY_DASHBOARD_PORT:-41800}
+      DASHBOARD_EXTERNAL_PORT: ${RELAY_DASHBOARD_PORT:-8081}
       TRAEFIK_DYNAMIC_CONFIG: /run/traefik-dynamic/ui-web-routes.yml
     ports:
-      - "${RELAY_DASHBOARD_BIND_IP:-127.0.0.1}:${RELAY_DASHBOARD_PORT:-41800}:8080/tcp"
+      - "${RELAY_DASHBOARD_BIND_IP:-127.0.0.1}:${RELAY_DASHBOARD_PORT:-8081}:8080/tcp"
     volumes:
       - ../backup.tf:/workspace/backup.tf:ro
       - ../budget.tf:/workspace/budget.tf:ro
