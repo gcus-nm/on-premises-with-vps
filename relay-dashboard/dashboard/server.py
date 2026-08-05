@@ -699,6 +699,37 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     }
                 )
                 return
+            if path.startswith(peer_prefix):
+                current_name, new_name = self.app.relay.rename_peer(
+                    unquote(path[len(peer_prefix) :]),
+                    payload.get("name"),
+                )
+                audit_detail = (
+                    new_name
+                    if new_name == current_name
+                    else f"{current_name} -> {new_name}"
+                )
+                self.app.audit.append(
+                    "wireguard-peer-rename",
+                    "success",
+                    audit_detail,
+                )
+                if new_name == current_name:
+                    message = f"WireGuard Peer名は「{new_name}」のままです。"
+                else:
+                    message = (
+                        f"WireGuard Peer名を「{current_name}」から"
+                        f"「{new_name}」へ変更しました。"
+                    )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": message,
+                        "name": new_name,
+                        "previous_name": current_name,
+                    }
+                )
+                return
             preset_prefix = "/api/wireguard/access-presets/"
             if path.startswith(preset_prefix):
                 current_name = normalize_wireguard_name(

@@ -1092,6 +1092,10 @@ class WireGuardManagementTests(unittest.TestCase):
             "10.99.0.1",
         )
         rotated_name, rotated_config = manager.rotate_peer("laptop")
+        previous_name, renamed_name = manager.rename_peer(
+            "laptop",
+            "work-laptop",
+        )
         rule = PeerAccessRule(
             "laptop-to-dashboard",
             "tcp",
@@ -1114,6 +1118,8 @@ class WireGuardManagementTests(unittest.TestCase):
 
         self.assertEqual(name, "laptop")
         self.assertEqual(rotated_name, "laptop")
+        self.assertEqual(previous_name, "laptop")
+        self.assertEqual(renamed_name, "work-laptop")
         self.assertTrue(config.endswith("\n"))
         self.assertTrue(rotated_config.startswith("[Interface]"))
         self.assertIn(
@@ -1125,6 +1131,10 @@ class WireGuardManagementTests(unittest.TestCase):
                 "--output",
                 "-",
             ],
+            commands,
+        )
+        self.assertIn(
+            ["rename", "laptop", "work-laptop"],
             commands,
         )
         self.assertIn(
@@ -1221,6 +1231,32 @@ class WireGuardManagementTests(unittest.TestCase):
             ],
             commands,
         )
+
+    def test_rejects_peer_rename_to_an_existing_name(self) -> None:
+        def runner(
+            command: list[str],
+            environment: dict[str, str],
+            cwd: Path | None,
+            timeout: int,
+        ) -> CommandResult:
+            arguments = command[2:]
+            if arguments == ["list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tADDRESS\tPUBLIC_KEY\n"
+                    "laptop\t10.99.0.4/32\tlaptop-key\n"
+                    "iphone\t10.99.0.5/32\tiphone-key\n",
+                    "",
+                )
+            raise AssertionError(arguments)
+
+        manager = RelayManager(
+            Path("/workspace/scripts/wg-relay.sh"),
+            "oci-relay",
+            runner,
+        )
+        with self.assertRaisesRegex(ConflictError, "すでに使用されています"):
+            manager.rename_peer("laptop", "iphone")
 
     def test_rejects_access_preset_rename_to_an_existing_name(self) -> None:
         def runner(

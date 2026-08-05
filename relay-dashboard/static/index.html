@@ -582,7 +582,7 @@
         <div class="dialog-heading">
           <div>
             <p class="eyebrow">WIREGUARD PEER</p>
-            <h2>Peerを追加</h2>
+            <h2 id="peer-dialog-title">Peerを追加</h2>
           </div>
           <button
             class="icon-button"
@@ -592,6 +592,7 @@
             formnovalidate
           >×</button>
         </div>
+        <input type="hidden" id="peer-original-name">
         <div class="dialog-fields">
           <label>
             <span>端末名（Peer名）</span>
@@ -610,9 +611,9 @@
             <input id="peer-address" required placeholder="10.99.0.4" autocomplete="off">
             <small>空きアドレスを自動入力します。設定ファイルでは/32になります。</small>
           </label>
-          <div class="secret-notice">
-            <strong>接続設定とQRコードは発行時だけ表示されます</strong>
-            <p>
+          <div class="secret-notice" id="peer-secret-notice">
+            <strong id="peer-secret-notice-title">接続設定とQRコードは発行時だけ表示されます</strong>
+            <p id="peer-secret-notice-text">
               秘密鍵はOCI・管理画面・Dockerボリュームへ保存しません。
               紛失した場合は鍵を更新して再発行してください。
             </p>

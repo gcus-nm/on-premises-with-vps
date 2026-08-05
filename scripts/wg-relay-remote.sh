@@ -34,6 +34,7 @@ Usage:
   wg-relay init --server-address CIDR --listen-port PORT --endpoint HOST:PORT
   wg-relay add NAME --address IPV4/32
   wg-relay update NAME --address IPV4/32
+  wg-relay rename CURRENT_NAME NEW_NAME
   wg-relay delete NAME
   wg-relay list
   wg-relay status
@@ -504,6 +505,49 @@ apply_peer() {
     action_label="updated"
   fi
   log "${action_label} peer ${name} (${address})"
+}
+
+rename_peer() {
+  local current_name="$1"
+  local new_name="$2"
+  local current_file new_file temporary_peer backup_peer
+
+  ensure_initialized
+  validate_name "${current_name}"
+  validate_name "${new_name}"
+  current_file="${PEER_DIR}/${current_name}.conf"
+  new_file="${PEER_DIR}/${new_name}.conf"
+  [ -e "${current_file}" ] || die "peer does not exist: ${current_name}"
+  if [ "${current_name}" = "${new_name}" ]; then
+    log "peer name is already ${current_name}"
+    return
+  fi
+  [ ! -e "${new_file}" ] || die "peer already exists: ${new_name}"
+
+  temporary_peer="$(mktemp "${PEER_DIR}/.${new_name}.XXXXXX")"
+  backup_peer="$(mktemp "${PEER_DIR}/.${current_name}.backup.XXXXXX")"
+  cp "${current_file}" "${backup_peer}"
+  awk -v managed_name="${new_name}" '
+    NR == 1 && /^# Managed peer: / { $0 = "# Managed peer: " managed_name }
+    { print }
+  ' "${current_file}" >"${temporary_peer}"
+
+  install -o root -g root -m 0600 "${temporary_peer}" "${new_file}"
+  rm -f "${temporary_peer}"
+  rm -f "${current_file}"
+
+  if ! render_config || ! sync_interface; then
+    log "peer rename failed; restoring the previous name"
+    rm -f "${new_file}"
+    install -o root -g root -m 0600 "${backup_peer}" "${current_file}"
+    render_config
+    sync_interface || true
+    rm -f "${backup_peer}"
+    die "could not rename peer"
+  fi
+
+  rm -f "${backup_peer}"
+  log "renamed peer ${current_name} -> ${new_name}"
 }
 
 delete_peer() {
@@ -1216,6 +1260,10 @@ main() {
     add | update)
       [ "$#" -eq 3 ] && [ "$2" = "--address" ] || die "usage: wg-relay ${command_name} NAME --address IPV4/32"
       apply_peer "${command_name}" "$1" "$3"
+      ;;
+    rename)
+      [ "$#" -eq 2 ] || die "usage: wg-relay rename CURRENT_NAME NEW_NAME"
+      rename_peer "$1" "$2"
       ;;
     delete)
       [ "$#" -eq 1 ] || die "usage: wg-relay delete NAME"

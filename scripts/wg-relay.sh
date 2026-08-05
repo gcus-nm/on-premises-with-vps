@@ -31,6 +31,7 @@ Usage:
   ./scripts/wg-relay.sh init [--server-address CIDR] [--listen-port PORT] [--endpoint HOST:PORT]
   ./scripts/wg-relay.sh add NAME --address IPV4/32 [--output FILE|-]
   ./scripts/wg-relay.sh update NAME --address IPV4/32 [--output FILE|-]
+  ./scripts/wg-relay.sh rename CURRENT_NAME NEW_NAME
   ./scripts/wg-relay.sh delete NAME [--yes]
   ./scripts/wg-relay.sh list
   ./scripts/wg-relay.sh status
@@ -310,6 +311,10 @@ main() {
       ;;
     add | update)
       generate_client_config "${command_name}" "$@"
+      ;;
+    rename)
+      [ "$#" -eq 2 ] || die "usage: ./scripts/wg-relay.sh rename CURRENT_NAME NEW_NAME"
+      remote_command rename "$1" "$2"
       ;;
     delete)
       [ "$#" -ge 1 ] && [ "$#" -le 2 ] || die "usage: ./scripts/wg-relay.sh delete NAME [--yes]"

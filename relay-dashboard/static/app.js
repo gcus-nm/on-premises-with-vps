@@ -131,8 +131,12 @@ const elements = {
   wireguardError: document.querySelector("#wireguard-error"),
   peerDialog: document.querySelector("#peer-dialog"),
   peerForm: document.querySelector("#peer-form"),
+  peerDialogTitle: document.querySelector("#peer-dialog-title"),
+  peerOriginalName: document.querySelector("#peer-original-name"),
   peerName: document.querySelector("#peer-name"),
   peerAddress: document.querySelector("#peer-address"),
+  peerSecretNoticeTitle: document.querySelector("#peer-secret-notice-title"),
+  peerSecretNoticeText: document.querySelector("#peer-secret-notice-text"),
   peerFormError: document.querySelector("#peer-form-error"),
   savePeerButton: document.querySelector("#save-peer-button"),
   peerConfigDialog: document.querySelector("#peer-config-dialog"),
@@ -338,6 +342,7 @@ function renderPeerItem(peer, locked) {
             ? `<button class="small-button" type="button" data-peer-access="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>プリセット割り当て</button>`
             : ""
         }
+        <button class="small-button" type="button" data-peer-edit="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>名前を編集</button>
         <button class="small-button edit" type="button" data-peer-rotate="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>設定を再発行</button>
         <button class="small-button danger" type="button" data-peer-delete="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>削除</button>
       </div>
@@ -1662,34 +1667,82 @@ async function syncRelay() {
 function openNewPeer() {
   if (appState.busy || appState.wireguardLoading) return;
   elements.peerForm.reset();
+  elements.peerOriginalName.value = "";
+  elements.peerDialogTitle.textContent = "Peerを追加";
+  elements.peerAddress.readOnly = false;
   elements.peerAddress.value = appState.suggestedPeerAddress;
+  elements.peerSecretNoticeTitle.textContent =
+    "接続設定とQRコードは発行時だけ表示されます";
+  elements.peerSecretNoticeText.textContent =
+    "秘密鍵はOCI・管理画面・Dockerボリュームへ保存しません。紛失した場合は鍵を更新して再発行してください。";
+  elements.savePeerButton.textContent = "追加して発行";
   elements.peerFormError.textContent = "";
   elements.peerDialog.showModal();
   elements.peerName.focus();
 }
 
+function openEditPeer(name) {
+  const peer = appState.peers.find((item) => item.name === name);
+  if (!peer || appState.busy || appState.wireguardLoading) return;
+  elements.peerForm.reset();
+  elements.peerOriginalName.value = peer.name;
+  elements.peerDialogTitle.textContent = "Peer名を編集";
+  elements.peerName.value = peer.name;
+  elements.peerAddress.value = peer.address;
+  elements.peerAddress.readOnly = true;
+  elements.peerSecretNoticeTitle.textContent = "名前だけを変更します";
+  elements.peerSecretNoticeText.textContent =
+    "WireGuardアドレス、公開鍵、接続設定、アクセスプリセット割り当ては維持されます。";
+  elements.savePeerButton.textContent = "名前を保存";
+  elements.peerFormError.textContent = "";
+  elements.peerDialog.showModal();
+  elements.peerName.focus();
+  elements.peerName.select();
+}
+
 async function savePeer() {
   elements.peerFormError.textContent = "";
   if (!elements.peerForm.reportValidity()) return;
-  setButtonBusy(elements.savePeerButton, true, "追加中…");
+  const originalName = elements.peerOriginalName.value;
+  setButtonBusy(
+    elements.savePeerButton,
+    true,
+    originalName ? "変更中…" : "追加中…",
+  );
   try {
-    const payload = await api("/api/wireguard/peers", {
-      method: "POST",
-      body: {
-        name: elements.peerName.value,
-        address: elements.peerAddress.value,
+    const payload = await api(
+      originalName
+        ? `/api/wireguard/peers/${encodeURIComponent(originalName)}`
+        : "/api/wireguard/peers",
+      {
+        method: originalName ? "PUT" : "POST",
+        body: originalName
+          ? { name: elements.peerName.value }
+          : {
+              name: elements.peerName.value,
+              address: elements.peerAddress.value,
+            },
       },
-    });
+    );
     elements.peerDialog.close();
-    showPeerConfiguration(payload);
-    toast(payload.message || "Peerを追加しました。");
-    refreshAfterWireGuardMutation().catch((error) => {
-      toast(firstLine(error.message), true);
-    });
+    if (originalName) {
+      await refreshAfterWireGuardMutation();
+      toast(payload.message || "Peer名を変更しました。");
+    } else {
+      showPeerConfiguration(payload);
+      toast(payload.message || "Peerを追加しました。");
+      refreshAfterWireGuardMutation().catch((error) => {
+        toast(firstLine(error.message), true);
+      });
+    }
   } catch (error) {
     elements.peerFormError.textContent = firstLine(error.message);
   } finally {
-    setButtonBusy(elements.savePeerButton, false, "追加して設定を保存");
+    setButtonBusy(
+      elements.savePeerButton,
+      false,
+      originalName ? "名前を保存" : "追加して発行",
+    );
   }
 }
 
@@ -2136,11 +2189,13 @@ elements.groupMemberRows.addEventListener("change", updateGroupPreview);
 
 elements.wireguardPeerList.addEventListener("click", (event) => {
   const access = event.target.closest("[data-peer-access]");
+  const edit = event.target.closest("[data-peer-edit]");
   const rotate = event.target.closest("[data-peer-rotate]");
   const remove = event.target.closest("[data-peer-delete]");
   if (access) {
     openPeerAccessAssignment(access.dataset.peerAccess);
   }
+  if (edit) openEditPeer(edit.dataset.peerEdit);
   if (rotate) rotatePeer(rotate.dataset.peerRotate);
   if (remove) deletePeer(remove.dataset.peerDelete);
 });

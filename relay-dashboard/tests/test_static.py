@@ -104,6 +104,8 @@ class RouteDialogMarkupTests(unittest.TestCase):
             "wireguard-peer-list",
             "wireguard-access-list",
             "peer-dialog",
+            "peer-dialog-title",
+            "peer-original-name",
             "peer-config-dialog",
             "peer-config-qr",
             "download-peer-config-button",
@@ -122,6 +124,8 @@ class RouteDialogMarkupTests(unittest.TestCase):
             self.assertIn(endpoint, javascript)
         self.assertIn("downloadClientConfig", javascript)
         self.assertIn("showPeerConfiguration", javascript)
+        self.assertIn("openEditPeer", javascript)
+        self.assertIn("data-peer-edit", javascript)
         self.assertIn("設定を再発行", javascript)
         self.assertIn("プリセット割り当て", javascript)
         self.assertNotIn("elements.accessRuleName.readOnly = true", javascript)

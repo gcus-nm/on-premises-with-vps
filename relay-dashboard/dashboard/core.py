@@ -2743,6 +2743,37 @@ class RelayManager:
             )
         return normalized_name, result.stdout + "\n"
 
+    def rename_peer(
+        self,
+        current_name: Any,
+        new_name: Any,
+    ) -> tuple[str, str]:
+        normalized_current_name = normalize_wireguard_name(
+            current_name,
+            "現在のPeer名",
+            existing=True,
+        )
+        normalized_new_name = normalize_wireguard_name(new_name, "新しいPeer名")
+        peers = self.list_peers()
+        if normalized_current_name not in peers:
+            raise ValidationError(
+                f"WireGuard Peerが見つかりません: {normalized_current_name}"
+            )
+        if normalized_new_name == normalized_current_name:
+            return normalized_current_name, normalized_new_name
+        if normalized_new_name in peers:
+            raise ConflictError(
+                f"Peer名はすでに使用されています: {normalized_new_name}"
+            )
+        self._run(
+            [
+                "rename",
+                normalized_current_name,
+                normalized_new_name,
+            ]
+        )
+        return normalized_current_name, normalized_new_name
+
     def delete_peer(self, name: Any) -> str:
         normalized_name = normalize_wireguard_name(name, "Peer名", existing=True)
         self._run(["delete", normalized_name, "--yes"])

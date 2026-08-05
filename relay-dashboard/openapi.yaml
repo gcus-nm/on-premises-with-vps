@@ -207,6 +207,28 @@ paths:
           description: Access preset deleted from the relay
           content: { application/json: { schema: { type: object } } }
   /api/wireguard/peers/{name}:
+    put:
+      operationId: renameWireGuardPeer
+      description: >-
+        Renames the Peer while preserving its address, public key, client configuration,
+        and access preset assignments.
+      parameters:
+        - $ref: '#/components/parameters/Csrf'
+        - $ref: '#/components/parameters/PeerName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,31}$' }
+      responses:
+        '200':
+          description: Peer renamed without rotating its key
+          content: { application/json: { schema: { type: object } } }
     delete:
       operationId: deleteWireGuardPeer
       parameters:

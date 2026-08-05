@@ -608,6 +608,23 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(rotated_without_qr["qr_svg_base64"], "")
         self.assertIn("構成ファイルは取得できます", rotated_without_qr["qr_warning"])
 
+        self.app.relay.rename_peer = Mock(  # type: ignore[method-assign]
+            return_value=("mac-admin", "work-mac")
+        )
+        status, renamed = self.request(
+            "/api/wireguard/peers/mac-admin",
+            method="PUT",
+            body={"name": "work-mac"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.app.relay.rename_peer.assert_called_once_with(
+            "mac-admin",
+            "work-mac",
+        )
+        self.assertEqual(renamed["previous_name"], "mac-admin")
+        self.assertEqual(renamed["name"], "work-mac")
+
         self.app.relay.create_peer_access_preset = Mock()  # type: ignore[method-assign]
         preset_payload = {
             "name": "dashboard",
