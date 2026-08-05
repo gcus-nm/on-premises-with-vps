@@ -24,6 +24,8 @@ const appState = {
   dashboardPort: 8081,
   wireguardLoading: true,
   wireguardError: "",
+  pendingPeerArtifact: null,
+  pendingPeerQrUrl: "",
 };
 
 const routeStateLabels = {
@@ -133,6 +135,13 @@ const elements = {
   peerAddress: document.querySelector("#peer-address"),
   peerFormError: document.querySelector("#peer-form-error"),
   savePeerButton: document.querySelector("#save-peer-button"),
+  peerConfigDialog: document.querySelector("#peer-config-dialog"),
+  peerConfigTitle: document.querySelector("#peer-config-title"),
+  peerConfigQrSection: document.querySelector("#peer-config-qr-section"),
+  peerConfigQr: document.querySelector("#peer-config-qr"),
+  peerConfigWarning: document.querySelector("#peer-config-warning"),
+  downloadPeerQrButton: document.querySelector("#download-peer-qr-button"),
+  downloadPeerConfigButton: document.querySelector("#download-peer-config-button"),
   accessRuleDialog: document.querySelector("#access-rule-dialog"),
   accessRuleForm: document.querySelector("#access-rule-form"),
   accessRuleDialogTitle: document.querySelector("#access-rule-dialog-title"),
@@ -320,7 +329,7 @@ function renderPeerItem(peer, locked) {
             ? `<button class="small-button" type="button" data-peer-access="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>アクセス追加</button>`
             : ""
         }
-        <button class="small-button edit" type="button" data-peer-rotate="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>鍵を更新</button>
+        <button class="small-button edit" type="button" data-peer-rotate="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>設定を再発行</button>
         <button class="small-button danger" type="button" data-peer-delete="${escapeAttribute(peer.name)}" ${locked ? "disabled" : ""}>削除</button>
       </div>
     </article>
@@ -1659,10 +1668,12 @@ async function savePeer() {
         address: elements.peerAddress.value,
       },
     });
-    downloadClientConfig(payload);
     elements.peerDialog.close();
-    await refreshAfterWireGuardMutation();
+    showPeerConfiguration(payload);
     toast(payload.message || "Peerを追加しました。");
+    refreshAfterWireGuardMutation().catch((error) => {
+      toast(firstLine(error.message), true);
+    });
   } catch (error) {
     elements.peerFormError.textContent = firstLine(error.message);
   } finally {
@@ -1670,7 +1681,8 @@ async function savePeer() {
   }
 }
 
-function downloadClientConfig(payload) {
+function downloadClientConfig(payload = appState.pendingPeerArtifact) {
+  if (!payload) throw new Error("発行済みの接続設定がありません。");
   const content = String(payload.client_config || "");
   if (!content) throw new Error("クライアント接続設定を取得できませんでした。");
   const blob = new Blob([content], { type: "application/x-wireguard-profile" });
@@ -1683,7 +1695,71 @@ function downloadClientConfig(payload) {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  payload.client_config = "";
+}
+
+function blobFromBase64(value, type) {
+  const binary = window.atob(String(value || ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type });
+}
+
+function showPeerConfiguration(payload) {
+  clearPeerConfiguration();
+  if (!payload.client_config) {
+    throw new Error("クライアント接続設定を取得できませんでした。");
+  }
+  appState.pendingPeerArtifact = payload;
+  const peerName = String(payload.filename || "wireguard.conf").replace(/\.conf$/i, "");
+  elements.peerConfigTitle.textContent = `${peerName} の接続設定`;
+  elements.peerConfigWarning.textContent = String(payload.qr_warning || "");
+
+  const qrContent = String(payload.qr_svg_base64 || "");
+  elements.peerConfigQrSection.hidden = !qrContent;
+  if (qrContent) {
+    try {
+      const qrBlob = blobFromBase64(qrContent, "image/svg+xml");
+      appState.pendingPeerQrUrl = URL.createObjectURL(qrBlob);
+      elements.peerConfigQr.src = appState.pendingPeerQrUrl;
+    } catch {
+      elements.peerConfigQrSection.hidden = true;
+      elements.peerConfigWarning.textContent =
+        "QRコードを表示できませんでした。構成ファイルをダウンロードしてください。";
+    }
+  }
+  elements.peerConfigDialog.showModal();
+}
+
+function downloadPeerQr() {
+  const payload = appState.pendingPeerArtifact;
+  if (!payload || !appState.pendingPeerQrUrl) {
+    throw new Error("QRコードを取得できませんでした。");
+  }
+  const link = document.createElement("a");
+  link.href = appState.pendingPeerQrUrl;
+  link.download = String(payload.qr_filename || "wireguard-qr.svg");
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+function clearPeerConfiguration() {
+  if (appState.pendingPeerArtifact) {
+    appState.pendingPeerArtifact.client_config = "";
+    appState.pendingPeerArtifact.qr_svg_base64 = "";
+  }
+  appState.pendingPeerArtifact = null;
+  if (appState.pendingPeerQrUrl) URL.revokeObjectURL(appState.pendingPeerQrUrl);
+  appState.pendingPeerQrUrl = "";
+  elements.peerConfigQr.removeAttribute("src");
+  elements.peerConfigWarning.textContent = "";
+}
+
+function closePeerConfiguration() {
+  elements.peerConfigDialog.close();
 }
 
 async function rotatePeer(name) {
@@ -1699,9 +1775,11 @@ async function rotatePeer(name) {
         body: { confirmation },
       },
     );
-    downloadClientConfig(payload);
-    await refreshAfterWireGuardMutation();
+    showPeerConfiguration(payload);
     toast(payload.message || "鍵を更新しました。");
+    refreshAfterWireGuardMutation().catch((error) => {
+      toast(firstLine(error.message), true);
+    });
   } catch (error) {
     toast(firstLine(error.message), true);
   }
@@ -1931,6 +2009,23 @@ document.querySelector("#wireguard-refresh-button").addEventListener("click", ()
   loadWireGuard().catch((error) => toast(firstLine(error.message), true));
 });
 elements.savePeerButton.addEventListener("click", savePeer);
+elements.downloadPeerConfigButton.addEventListener("click", () => {
+  try {
+    downloadClientConfig();
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  }
+});
+elements.downloadPeerQrButton.addEventListener("click", () => {
+  try {
+    downloadPeerQr();
+  } catch (error) {
+    toast(firstLine(error.message), true);
+  }
+});
+document.querySelector("#close-peer-config-button").addEventListener("click", closePeerConfiguration);
+document.querySelector("#finish-peer-config-button").addEventListener("click", closePeerConfiguration);
+elements.peerConfigDialog.addEventListener("close", clearPeerConfiguration);
 elements.saveAccessRuleButton.addEventListener("click", saveAccessRule);
 document.querySelector("#close-plan-button").addEventListener("click", () => elements.planDialog.close());
 document.querySelector("#close-info-button").addEventListener("click", () => elements.infoDialog.close());

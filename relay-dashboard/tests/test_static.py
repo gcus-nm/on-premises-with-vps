@@ -104,6 +104,10 @@ class RouteDialogMarkupTests(unittest.TestCase):
             "wireguard-peer-list",
             "wireguard-access-list",
             "peer-dialog",
+            "peer-config-dialog",
+            "peer-config-qr",
+            "download-peer-config-button",
+            "download-peer-qr-button",
             "access-rule-dialog",
         ):
             self.assertIn(f'id="{element_id}"', html)
@@ -114,6 +118,9 @@ class RouteDialogMarkupTests(unittest.TestCase):
         ):
             self.assertIn(endpoint, javascript)
         self.assertIn("downloadClientConfig", javascript)
+        self.assertIn("showPeerConfiguration", javascript)
+        self.assertIn("設定を再発行", javascript)
+        self.assertIn("QRコードで作成", html)
 
     def test_web_route_management_and_safety_copy_are_present(self) -> None:
         project_root = Path(__file__).resolve().parents[2]

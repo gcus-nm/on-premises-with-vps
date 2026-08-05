@@ -44,6 +44,9 @@ class DashboardServerTests(unittest.TestCase):
         self.environment = patch.dict(os.environ, environment, clear=False)
         self.environment.start()
         self.app = AppContext()
+        self.app.wireguard_qr.generate = Mock(
+            return_value='<svg xmlns="http://www.w3.org/2000/svg"></svg>\n'
+        )
         self.server = DashboardServer(self.app)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -566,6 +569,13 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(created["filename"], "mac-admin.conf")
         self.assertIn("PrivateKey", created["client_config"])
+        self.assertTrue(created["one_time"])
+        self.assertEqual(created["qr_filename"], "mac-admin-wireguard-qr.svg")
+        self.assertIn(
+            b"<svg",
+            base64.b64decode(str(created["qr_svg_base64"])),
+        )
+        self.assertEqual(created["qr_warning"], "")
         self.assertNotIn(
             "PrivateKey",
             (Path(self.temporary.name) / "audit.jsonl").read_text(encoding="utf-8"),
@@ -585,6 +595,17 @@ class DashboardServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertIn("rotated", rotated["client_config"])
+
+        self.app.wireguard_qr.generate = Mock(side_effect=RuntimeError("QR失敗"))
+        status, rotated_without_qr = self.request(
+            "/api/wireguard/peers/mac-admin/rotate",
+            method="POST",
+            body={"confirmation": "ROTATE"},
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(rotated_without_qr["qr_svg_base64"], "")
+        self.assertIn("構成ファイルは取得できます", rotated_without_qr["qr_warning"])
 
         self.app.relay.create_peer_access_rule = Mock()  # type: ignore[method-assign]
         access_payload = {

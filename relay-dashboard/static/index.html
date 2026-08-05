@@ -250,8 +250,8 @@
               <p class="eyebrow">PRIVATE NETWORK CONTROL</p>
               <h2 id="wireguard-heading">WireGuard管理</h2>
               <p>
-                Peer、鍵、Peer間アクセスをOCIへ即時反映します。
-                クライアント秘密鍵は管理画面へ保存しません。
+                Peer、鍵、Peer間アクセスをOCIへ即時反映し、iPhoneなどの接続設定を
+                QRコードまたは構成ファイルで一度だけ発行します。
               </p>
             </div>
             <button class="button button-quiet" id="wireguard-refresh-button" type="button">
@@ -594,13 +594,13 @@
         </div>
         <div class="dialog-fields">
           <label>
-            <span>Peer名</span>
+            <span>端末名（Peer名）</span>
             <input
               id="peer-name"
               required
               maxlength="32"
               pattern="[a-z0-9][a-z0-9-]{0,31}"
-              placeholder="laptop2"
+              placeholder="iphone-gcus"
               autocomplete="off"
             >
             <small>小文字英数字とハイフン、最大32文字。</small>
@@ -611,7 +611,7 @@
             <small>空きアドレスを自動入力します。設定ファイルでは/32になります。</small>
           </label>
           <div class="secret-notice">
-            <strong>接続設定は一度だけダウンロードされます</strong>
+            <strong>接続設定とQRコードは発行時だけ表示されます</strong>
             <p>
               秘密鍵はOCI・管理画面・Dockerボリュームへ保存しません。
               紛失した場合は鍵を更新して再発行してください。
@@ -624,10 +624,67 @@
             キャンセル
           </button>
           <button class="button button-primary" id="save-peer-button" type="button">
-            追加して設定を保存
+            追加して発行
           </button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="peer-config-dialog" class="wide-dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">ONE-TIME WIREGUARD PROFILE</p>
+          <h2 id="peer-config-title">接続設定を発行しました</h2>
+        </div>
+        <button
+          class="icon-button"
+          id="close-peer-config-button"
+          aria-label="閉じる"
+          type="button"
+        >×</button>
+      </div>
+      <div class="peer-config-content">
+        <div class="secret-notice peer-config-notice">
+          <strong>この画面を閉じると再表示できません</strong>
+          <p>
+            QRコードと構成ファイルにはクライアント秘密鍵が含まれます。
+            必要な端末へ登録してから閉じてください。再発行すると以前の設定は失効します。
+          </p>
+        </div>
+        <div class="peer-config-layout">
+          <section class="peer-config-qr" id="peer-config-qr-section">
+            <p class="eyebrow">SCAN ON IPHONE</p>
+            <div class="qr-frame">
+              <img id="peer-config-qr" alt="WireGuard接続設定のQRコード">
+            </div>
+            <button class="button button-quiet button-full" id="download-peer-qr-button" type="button">
+              QRコードをダウンロード
+            </button>
+          </section>
+          <section class="peer-config-steps">
+            <p class="eyebrow">IMPORT GUIDE</p>
+            <h3>iPhoneへ追加</h3>
+            <ol>
+              <li>iPhoneでWireGuardアプリを開く</li>
+              <li>「＋」からQRコードで作成を選ぶ</li>
+              <li>左のQRコードを読み取り、トンネルを保存する</li>
+            </ol>
+            <p class="muted">
+              この画面をiPhone自身で開いている場合は、下の構成ファイルを保存して
+              WireGuardアプリへ読み込んでください。
+            </p>
+            <p class="form-error peer-config-warning" id="peer-config-warning" role="alert"></p>
+          </section>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button class="button button-primary" id="download-peer-config-button" type="button">
+          構成ファイルをダウンロード
+        </button>
+        <button class="button button-quiet" id="finish-peer-config-button" type="button">
+          登録完了・閉じる
+        </button>
+      </div>
     </dialog>
 
     <dialog id="access-rule-dialog">

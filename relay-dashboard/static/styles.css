@@ -1332,6 +1332,62 @@ td.description-cell {
   line-height: 1.65;
 }
 
+.peer-config-content {
+  display: grid;
+  gap: 18px;
+  padding: 22px 25px 0;
+}
+
+.peer-config-notice {
+  margin: 0;
+}
+
+.peer-config-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(260px, 1.1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.peer-config-qr,
+.peer-config-steps {
+  min-width: 0;
+}
+
+.qr-frame {
+  display: grid;
+  margin-bottom: 12px;
+  padding: 18px;
+  place-items: center;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.qr-frame img {
+  display: block;
+  width: min(100%, 320px);
+  aspect-ratio: 1;
+}
+
+.peer-config-steps h3 {
+  margin-bottom: 14px;
+  font-size: 20px;
+}
+
+.peer-config-steps ol {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding-left: 21px;
+  color: #cfe2da;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.peer-config-warning {
+  margin: 14px 0 0;
+}
+
 .muted {
   color: var(--muted);
   font-size: 12px;
@@ -1792,6 +1848,10 @@ code {
 
   .plan-summary {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .peer-config-layout {
+    grid-template-columns: 1fr;
   }
 
   .confirm-zone {
