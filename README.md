@@ -322,7 +322,9 @@ SSHできない場合は次を確認してください。
 
 Windowsへインポートする設定は`generated/wireguard/windows-minibox.conf`へ作成されます。このファイルにはWindows側秘密鍵が含まれ、Git管理対象外です。詳細は[WIREGUARD.md](WIREGUARD.md)を確認してください。
 
-MacからWindowsへのRDPなど、WireGuard Peer間で必要な通信だけを許可する場合は`peer-forward`を使用します。RDPの例とクライアント側経路の設定は[MacからWindowsへRDP接続する](WIREGUARD.md#macからwindowsへrdp接続する)を参照してください。
+WireGuard Peer間で必要な通信だけを許可する場合は、接続先を再利用できる`peer-forward`
+プリセットを使用します。使い方は[Peer間アクセスプリセットを使う](WIREGUARD.md#peer間アクセスプリセットを使う)、
+RDPの例は[MacからWindowsへRDP接続する](WIREGUARD.md#macからwindowsへrdp接続する)を参照してください。
 
 OCI環境の作成後は、次の順番で実装します。
 

@@ -40,8 +40,9 @@ Usage:
   ./scripts/wg-relay.sh forward delete NAME [--yes]
   ./scripts/wg-relay.sh forward list
   ./scripts/wg-relay.sh forward status
-  ./scripts/wg-relay.sh peer-forward add NAME --protocol tcp|udp --source-address IPV4 --target-address IPV4 --target-port PORT
-  ./scripts/wg-relay.sh peer-forward update NAME --protocol tcp|udp --source-address IPV4 --target-address IPV4 --target-port PORT
+  ./scripts/wg-relay.sh peer-forward add NAME --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
+  ./scripts/wg-relay.sh peer-forward update NAME --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
+  ./scripts/wg-relay.sh peer-forward assign-source SOURCE_IPV4 [NAME...]
   ./scripts/wg-relay.sh peer-forward delete NAME [--yes]
   ./scripts/wg-relay.sh peer-forward list
   ./scripts/wg-relay.sh peer-forward status
@@ -263,6 +264,10 @@ peer_forward_remote() {
       [ "$#" -ge 1 ] || die "peer-forward ${operation} requires NAME"
       remote_command peer-forward "${operation}" "$@"
       ;;
+    assign-source)
+      [ "$#" -ge 1 ] || die "peer-forward assign-source requires SOURCE_IPV4"
+      remote_command peer-forward assign-source "$@"
+      ;;
     delete)
       name="${1:-}"
       confirmed="${2:-}"
@@ -283,7 +288,7 @@ peer_forward_remote() {
       [ "$#" -eq 0 ] || die "peer-forward ${operation} does not accept arguments"
       remote_command peer-forward "${operation}"
       ;;
-    *) die "usage: ./scripts/wg-relay.sh peer-forward add|update|delete|list|status ..." ;;
+    *) die "usage: ./scripts/wg-relay.sh peer-forward add|update|assign-source|delete|list|status ..." ;;
   esac
 }
 

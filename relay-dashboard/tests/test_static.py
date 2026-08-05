@@ -109,17 +109,21 @@ class RouteDialogMarkupTests(unittest.TestCase):
             "download-peer-config-button",
             "download-peer-qr-button",
             "access-rule-dialog",
+            "peer-access-dialog",
+            "peer-access-preset-list",
         ):
             self.assertIn(f'id="{element_id}"', html)
         for endpoint in (
             "/api/wireguard",
             "/api/wireguard/peers",
-            "/api/wireguard/access-rules",
+            "/api/wireguard/access-presets",
+            "/access-presets",
         ):
             self.assertIn(endpoint, javascript)
         self.assertIn("downloadClientConfig", javascript)
         self.assertIn("showPeerConfiguration", javascript)
         self.assertIn("設定を再発行", javascript)
+        self.assertIn("プリセット割り当て", javascript)
         self.assertIn("QRコードで作成", html)
 
     def test_web_route_management_and_safety_copy_are_present(self) -> None:

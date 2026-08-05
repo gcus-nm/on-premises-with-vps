@@ -12,6 +12,7 @@ from dashboard.core import (
     CommandResult,
     ConflictError,
     DashboardError,
+    PeerAccessPreset,
     PeerAccessRule,
     RelayManager,
     Route,
@@ -920,14 +921,18 @@ class WireGuardManagementTests(unittest.TestCase):
             "  latest handshake: 42 seconds ago\n"
             "  transfer: 1.2 MiB received, 3.4 MiB sent\n"
         )
-        rules = parse_peer_access_rules(
-            "NAME\tPROTOCOL\tSOURCE\tTARGET\n"
-            "mac-to-dashboard\ttcp\t10.99.0.3\t10.99.0.2:8081\n"
+        presets = parse_peer_access_rules(
+            "NAME\tPROTOCOL\tSOURCES\tTARGET\n"
+            "dashboard\ttcp\t10.99.0.3,10.99.0.5\t10.99.0.2:8081\n"
         )
 
         self.assertEqual(peers["windows-minibox"].address, "10.99.0.2")
         self.assertEqual(statuses["mac-key"]["latest_handshake"], "42 seconds ago")
-        self.assertEqual(rules["mac-to-dashboard"].target_port, 8081)
+        self.assertEqual(presets["dashboard"].target_port, 8081)
+        self.assertEqual(
+            presets["dashboard"].source_addresses,
+            ("10.99.0.3", "10.99.0.5"),
+        )
 
     def test_validates_and_suggests_peer_addresses(self) -> None:
         peers = [
@@ -970,6 +975,89 @@ class WireGuardManagementTests(unittest.TestCase):
                     "target_port": 8081,
                 }
             )
+
+    def test_validates_reusable_peer_access_preset(self) -> None:
+        preset = PeerAccessPreset.from_mapping(
+            {
+                "name": "dashboard",
+                "protocol": "TCP",
+                "source_addresses": ["10.99.0.5", "10.99.0.3", "10.99.0.3"],
+                "target_address": "10.99.0.2",
+                "target_port": "8081",
+            }
+        )
+
+        self.assertEqual(preset.protocol, "tcp")
+        self.assertEqual(preset.source_addresses, ("10.99.0.3", "10.99.0.5"))
+        self.assertEqual(
+            PeerAccessPreset.from_mapping(
+                {
+                    "name": "unused-dashboard",
+                    "protocol": "tcp",
+                    "target_address": "10.99.0.2",
+                    "target_port": 8081,
+                }
+            ).source_addresses,
+            (),
+        )
+        with self.assertRaises(ValidationError):
+            PeerAccessPreset.from_mapping(
+                {
+                    "name": "same-peer",
+                    "protocol": "tcp",
+                    "source_addresses": ["10.99.0.2"],
+                    "target_address": "10.99.0.2",
+                    "target_port": 8081,
+                }
+            )
+
+    def test_wireguard_state_groups_sources_under_reusable_presets(self) -> None:
+        def runner(
+            command: list[str],
+            environment: dict[str, str],
+            cwd: Path | None,
+            timeout: int,
+        ) -> CommandResult:
+            arguments = command[2:]
+            if arguments == ["list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tADDRESS\tPUBLIC_KEY\n"
+                    "windows\t10.99.0.2/32\twindows-key\n"
+                    "mac\t10.99.0.3/32\tmac-key\n"
+                    "iphone\t10.99.0.5/32\tiphone-key\n",
+                    "",
+                )
+            if arguments == ["status"]:
+                return CommandResult(0, "interface: wg0\n", "")
+            if arguments == ["peer-forward", "list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tPROTOCOL\tSOURCES\tTARGET\n"
+                    "dashboard\ttcp\t10.99.0.3,10.99.0.5\t10.99.0.2:8081\n",
+                    "",
+                )
+            raise AssertionError(arguments)
+
+        state = RelayManager(
+            Path("/workspace/scripts/wg-relay.sh"),
+            "oci-relay",
+            runner,
+        ).wireguard_state(
+            "10.99.0.0/24",
+            "10.99.0.1",
+            "10.99.0.2",
+            8081,
+        )
+
+        peers = {peer["name"]: peer for peer in state["peers"]}
+        self.assertEqual(peers["mac"]["access_presets"], ["dashboard"])
+        self.assertEqual(peers["iphone"]["access_presets"], ["dashboard"])
+        self.assertEqual(peers["windows"]["target_presets"], ["dashboard"])
+        self.assertEqual(
+            state["access_presets"][0]["source_addresses"],
+            ("10.99.0.3", "10.99.0.5"),
+        )
 
     def test_manager_generates_peer_config_on_stdout_and_access_commands(self) -> None:
         commands: list[list[str]] = []
@@ -1014,6 +1102,15 @@ class WireGuardManagementTests(unittest.TestCase):
         manager.create_peer_access_rule(rule)
         manager.update_peer_access_rule(rule)
         manager.delete_peer_access_rule(rule.name)
+        preset = PeerAccessPreset(
+            "dashboard",
+            "tcp",
+            "10.99.0.2",
+            8081,
+            ("10.99.0.4", "10.99.0.5"),
+        )
+        manager.create_peer_access_preset(preset)
+        manager.set_peer_access_presets("laptop", ["dashboard"])
 
         self.assertEqual(name, "laptop")
         self.assertEqual(rotated_name, "laptop")
@@ -1028,6 +1125,28 @@ class WireGuardManagementTests(unittest.TestCase):
                 "--output",
                 "-",
             ],
+            commands,
+        )
+        self.assertIn(
+            [
+                "peer-forward",
+                "add",
+                "dashboard",
+                "--protocol",
+                "tcp",
+                "--source-address",
+                "10.99.0.4",
+                "--source-address",
+                "10.99.0.5",
+                "--target-address",
+                "10.99.0.2",
+                "--target-port",
+                "8081",
+            ],
+            commands,
+        )
+        self.assertIn(
+            ["peer-forward", "assign-source", "10.99.0.4", "dashboard"],
             commands,
         )
         self.assertIn(
@@ -1049,6 +1168,60 @@ class WireGuardManagementTests(unittest.TestCase):
 
 
 class RelayScriptTests(unittest.TestCase):
+    def test_passes_peer_preset_assignment_to_remote_manager(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            binary_directory = temporary / "bin"
+            binary_directory.mkdir()
+            capture = temporary / "ssh-arguments"
+            fake_ssh = binary_directory / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                'printf "%s\\n" "$@" >"$WG_RELAY_TEST_CAPTURE"\n',
+                encoding="utf-8",
+            )
+            fake_ssh.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOME": str(temporary),
+                    "PATH": f"{binary_directory}:{environment['PATH']}",
+                    "WG_RELAY_TEST_CAPTURE": str(capture),
+                }
+            )
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(project_root / "scripts/wg-relay.sh"),
+                    "peer-forward",
+                    "assign-source",
+                    "10.99.0.3",
+                    "dashboard",
+                    "rdp",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                capture.read_text(encoding="utf-8").splitlines(),
+                [
+                    "oci-relay",
+                    "sudo",
+                    "/usr/local/sbin/wg-relay",
+                    "peer-forward",
+                    "assign-source",
+                    "10.99.0.3",
+                    "dashboard",
+                    "rdp",
+                ],
+            )
+
     def test_uses_runtime_home_ssh_config(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as directory:

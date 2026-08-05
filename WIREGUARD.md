@@ -231,6 +231,31 @@ Windowsから`ping 10.99.0.1`がタイムアウトする場合は、まずハン
 
 `latest handshake`が表示されない場合は、Windows側でトンネルが有効か、OCIのNSGとOSファイアウォールの両方でWireGuardのUDP待受ポートが許可されているかを確認してください。管理スクリプトを更新した直後は、`install`と`init`を再実行するとOSファイアウォール設定も反映されます。既存のPeerと鍵は維持されます。
 
+## Peer間アクセスプリセットを使う
+
+`peer-forward`は、接続先とポートを1つのプリセットとして保存し、複数の接続元Peerを
+割り当てられます。管理画面への接続先を先に登録する例です。
+
+```bash
+./scripts/wg-relay.sh peer-forward add dashboard --protocol tcp --target-address 10.99.0.2 --target-port 8081
+```
+
+`10.99.0.3`から使うプリセット一式を割り当てます。`assign-source`は指定した接続元Peerの
+割り当て全体を置き換えるため、複数使う場合はプリセット名をすべて列挙します。
+
+```bash
+./scripts/wg-relay.sh peer-forward assign-source 10.99.0.3 dashboard
+```
+
+`10.99.0.5`にも同じプリセットを割り当てる場合、プリセット自体の再作成は不要です。
+
+```bash
+./scripts/wg-relay.sh peer-forward assign-source 10.99.0.5 dashboard
+```
+
+旧形式の`SOURCE_ADDRESS`を持つ設定は引き続き読み込まれ、更新または割り当て変更時に
+複数接続元の`SOURCE_ADDRESSES`形式へ移行します。
+
 ## MacからWindowsへRDP接続する
 
 Macを`10.99.0.3`、Windowsを`10.99.0.2`としている場合の例です。RDPはWireGuard内だけで転送するため、OCI NSG、自宅ルーター、Windowsの物理LAN側でTCP/3389やUDP/3389を一般公開する必要はありません。
@@ -309,10 +334,11 @@ nc -vz 10.99.0.2 3389
 ./scripts/wg-relay.sh peer-forward delete mac-to-windows-rdp-udp
 ```
 
-Peer間通信ルールはOCIの次の場所へ保存され、WireGuardやVMの再起動、通常のポート転送更新後も`firewall-sync`によって再適用されます。
+Peer間アクセスプリセットはOCIの次の場所へ保存され、WireGuardやVMの再起動、通常のポート転送更新後も`firewall-sync`によって再適用されます。
 
 ```text
 /etc/wireguard/relay.d/peer-forwards/<ルール名>.conf
 ```
 
-Peer間通信ルールから参照中のPeerは削除できません。先に該当する`peer-forward`を削除してください。
+プリセットから参照中のPeerは削除できません。接続元の割り当てを外すか、接続先にしている
+`peer-forward`を先に削除してください。
