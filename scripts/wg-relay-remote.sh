@@ -34,6 +34,7 @@ Usage:
   wg-relay init --server-address CIDR --listen-port PORT --endpoint HOST:PORT
   wg-relay add NAME --address IPV4/32
   wg-relay update NAME --address IPV4/32
+  wg-relay rename CURRENT_NAME NEW_NAME
   wg-relay delete NAME
   wg-relay list
   wg-relay status
@@ -43,8 +44,9 @@ Usage:
   wg-relay forward delete NAME
   wg-relay forward list
   wg-relay forward status
-  wg-relay peer-forward add NAME --protocol tcp|udp --source-address IPV4 --target-address IPV4 --target-port PORT
-  wg-relay peer-forward update NAME --protocol tcp|udp --source-address IPV4 --target-address IPV4 --target-port PORT
+  wg-relay peer-forward add NAME --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
+  wg-relay peer-forward update NAME [--new-name NAME] --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
+  wg-relay peer-forward assign-source SOURCE_IPV4 [NAME...]
   wg-relay peer-forward delete NAME
   wg-relay peer-forward list
   wg-relay peer-forward status
@@ -250,6 +252,17 @@ read_forward_setting() {
   awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${file}"
 }
 
+read_peer_forward_sources() {
+  local file="$1"
+  local sources legacy_source
+  sources="$(read_forward_setting SOURCE_ADDRESSES "${file}")"
+  if [ -z "${sources}" ]; then
+    legacy_source="$(read_forward_setting SOURCE_ADDRESS "${file}")"
+    sources="${legacy_source}"
+  fi
+  printf '%s\n' "${sources}"
+}
+
 ensure_chain() {
   local table="$1"
   local chain="$2"
@@ -286,7 +299,8 @@ remove_chain() {
 
 firewall_sync() {
   local listen_port server_address relay_address interface_name forward_file peer_forward_file
-  local protocol public_port source_address target_address target_port peer_forward_name
+  local protocol public_port source_address source_addresses target_address target_port peer_forward_name
+  local -a peer_sources
 
   ensure_initialized
   listen_port="$(read_setting LISTEN_PORT)"
@@ -327,18 +341,22 @@ firewall_sync() {
     [ -f "${peer_forward_file}" ] || continue
     peer_forward_name="$(basename "${peer_forward_file}" .conf)"
     protocol="$(read_forward_setting PROTOCOL "${peer_forward_file}")"
-    source_address="$(read_forward_setting SOURCE_ADDRESS "${peer_forward_file}")"
+    source_addresses="$(read_peer_forward_sources "${peer_forward_file}")"
     target_address="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
     target_port="$(read_forward_setting TARGET_PORT "${peer_forward_file}")"
 
-    iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" \
-      -i wg0 -o wg0 -p "${protocol}" -s "${source_address}" -d "${target_address}" --dport "${target_port}" \
-      -m conntrack --ctstate NEW,ESTABLISHED \
-      -m comment --comment "peer-forward:${peer_forward_name}" -j ACCEPT
-    iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" \
-      -i wg0 -o wg0 -p "${protocol}" -s "${target_address}" -d "${source_address}" \
-      -m conntrack --ctstate RELATED,ESTABLISHED \
-      -m comment --comment "peer-forward:${peer_forward_name}:return" -j ACCEPT
+    IFS=',' read -r -a peer_sources <<<"${source_addresses}"
+    for source_address in "${peer_sources[@]}"; do
+      [ -n "${source_address}" ] || continue
+      iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" \
+        -i wg0 -o wg0 -p "${protocol}" -s "${source_address}" -d "${target_address}" --dport "${target_port}" \
+        -m conntrack --ctstate NEW,ESTABLISHED \
+        -m comment --comment "peer-forward:${peer_forward_name}:${source_address}" -j ACCEPT
+      iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" \
+        -i wg0 -o wg0 -p "${protocol}" -s "${target_address}" -d "${source_address}" \
+        -m conntrack --ctstate RELATED,ESTABLISHED \
+        -m comment --comment "peer-forward:${peer_forward_name}:${source_address}:return" -j ACCEPT
+    done
   done
 
   iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" -j RETURN
@@ -487,6 +505,49 @@ apply_peer() {
     action_label="updated"
   fi
   log "${action_label} peer ${name} (${address})"
+}
+
+rename_peer() {
+  local current_name="$1"
+  local new_name="$2"
+  local current_file new_file temporary_peer backup_peer
+
+  ensure_initialized
+  validate_name "${current_name}"
+  validate_name "${new_name}"
+  current_file="${PEER_DIR}/${current_name}.conf"
+  new_file="${PEER_DIR}/${new_name}.conf"
+  [ -e "${current_file}" ] || die "peer does not exist: ${current_name}"
+  if [ "${current_name}" = "${new_name}" ]; then
+    log "peer name is already ${current_name}"
+    return
+  fi
+  [ ! -e "${new_file}" ] || die "peer already exists: ${new_name}"
+
+  temporary_peer="$(mktemp "${PEER_DIR}/.${new_name}.XXXXXX")"
+  backup_peer="$(mktemp "${PEER_DIR}/.${current_name}.backup.XXXXXX")"
+  cp "${current_file}" "${backup_peer}"
+  awk -v managed_name="${new_name}" '
+    NR == 1 && /^# Managed peer: / { $0 = "# Managed peer: " managed_name }
+    { print }
+  ' "${current_file}" >"${temporary_peer}"
+
+  install -o root -g root -m 0600 "${temporary_peer}" "${new_file}"
+  rm -f "${temporary_peer}"
+  rm -f "${current_file}"
+
+  if ! render_config || ! sync_interface; then
+    log "peer rename failed; restoring the previous name"
+    rm -f "${new_file}"
+    install -o root -g root -m 0600 "${backup_peer}" "${current_file}"
+    render_config
+    sync_interface || true
+    rm -f "${backup_peer}"
+    die "could not rename peer"
+  fi
+
+  rm -f "${backup_peer}"
+  log "renamed peer ${current_name} -> ${new_name}"
 }
 
 delete_peer() {
@@ -719,37 +780,45 @@ ensure_registered_peer_address() {
 
 ensure_peer_address_not_referenced() {
   local address="${1%/*}"
-  local peer_forward_file source_address target_address peer_forward_name
+  local peer_forward_file source_address source_addresses target_address peer_forward_name
+  local -a peer_sources
 
   for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
     [ -f "${peer_forward_file}" ] || continue
-    source_address="$(read_forward_setting SOURCE_ADDRESS "${peer_forward_file}")"
+    source_addresses="$(read_peer_forward_sources "${peer_forward_file}")"
     target_address="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
-    if [ "${source_address}" = "${address}" ] || [ "${target_address}" = "${address}" ]; then
+    if [ "${target_address}" = "${address}" ]; then
       peer_forward_name="$(basename "${peer_forward_file}" .conf)"
       die "peer address is referenced by peer-forward ${peer_forward_name}; delete that rule first"
     fi
+    IFS=',' read -r -a peer_sources <<<"${source_addresses}"
+    for source_address in "${peer_sources[@]}"; do
+      if [ "${source_address}" = "${address}" ]; then
+        peer_forward_name="$(basename "${peer_forward_file}" .conf)"
+        die "peer address is referenced by peer-forward ${peer_forward_name}; remove that assignment first"
+      fi
+    done
   done
 }
 
 check_peer_forward_available() {
   local protocol="$1"
-  local source_address="$2"
+  local source_addresses="$2"
   local target_address="$3"
   local target_port="$4"
   local excluded_name="${5:-}"
-  local peer_forward_file existing_name existing_protocol existing_source existing_target existing_port
+  local peer_forward_file existing_name existing_protocol existing_sources existing_target existing_port
 
   for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
     [ -f "${peer_forward_file}" ] || continue
     existing_name="$(basename "${peer_forward_file}" .conf)"
     [ "${existing_name}" = "${excluded_name}" ] && continue
     existing_protocol="$(read_forward_setting PROTOCOL "${peer_forward_file}")"
-    existing_source="$(read_forward_setting SOURCE_ADDRESS "${peer_forward_file}")"
+    existing_sources="$(read_peer_forward_sources "${peer_forward_file}")"
     existing_target="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
     existing_port="$(read_forward_setting TARGET_PORT "${peer_forward_file}")"
     if [ "${existing_protocol}" = "${protocol}" ] &&
-      [ "${existing_source}" = "${source_address}" ] &&
+      [ "${existing_sources}" = "${source_addresses}" ] &&
       [ "${existing_target}" = "${target_address}" ] &&
       [ "${existing_port}" = "${target_port}" ]; then
       die "the same peer-forward is already assigned to ${existing_name}"
@@ -761,11 +830,14 @@ apply_peer_forward() {
   local mode="$1"
   local name="$2"
   shift 2
+  local new_name="${name}"
+  local new_name_provided=false
   local protocol=""
-  local source_address=""
+  local source_address source_addresses_text=""
+  local -a source_addresses=()
   local target_address=""
   local target_port=""
-  local peer_forward_file temporary_file backup_file action_label
+  local current_file destination_file temporary_file backup_file action_label
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -774,9 +846,15 @@ apply_peer_forward() {
         protocol="$2"
         shift 2
         ;;
+      --new-name)
+        [ "$#" -ge 2 ] || die "--new-name requires a value"
+        new_name="$2"
+        new_name_provided=true
+        shift 2
+        ;;
       --source-address)
         [ "$#" -ge 2 ] || die "--source-address requires a value"
-        source_address="$2"
+        source_addresses+=("$2")
         shift 2
         ;;
       --target-address)
@@ -795,49 +873,74 @@ apply_peer_forward() {
 
   ensure_initialized
   validate_name "${name}"
+  validate_name "${new_name}"
+  if [ "${mode}" != "update" ] && ${new_name_provided}; then
+    die "--new-name can only be used with peer-forward update"
+  fi
   [ -n "${protocol}" ] || die "--protocol is required"
-  [ -n "${source_address}" ] || die "--source-address is required"
   [ -n "${target_address}" ] || die "--target-address is required"
   [ -n "${target_port}" ] || die "--target-port is required"
   validate_protocol "${protocol}"
-  validate_target_address "${source_address}"
   validate_target_address "${target_address}"
-  [ "${source_address}" != "${target_address}" ] || die "source and target addresses must differ"
   validate_port "${target_port}"
-  ensure_registered_peer_address "${source_address}"
   ensure_registered_peer_address "${target_address}"
-  check_peer_forward_available "${protocol}" "${source_address}" "${target_address}" "${target_port}" "${name}"
+  for source_address in "${source_addresses[@]}"; do
+    validate_target_address "${source_address}"
+    [ "${source_address}" != "${target_address}" ] || die "source and target addresses must differ"
+    ensure_registered_peer_address "${source_address}"
+    case ",${source_addresses_text}," in
+      *",${source_address},"*) ;;
+      *)
+        if [ -n "${source_addresses_text}" ]; then
+          source_addresses_text="${source_addresses_text},${source_address}"
+        else
+          source_addresses_text="${source_address}"
+        fi
+        ;;
+    esac
+  done
+  check_peer_forward_available "${protocol}" "${source_addresses_text}" "${target_address}" "${target_port}" "${name}"
 
-  peer_forward_file="${PEER_FORWARD_DIR}/${name}.conf"
-  if [ "${mode}" = "add" ] && [ -e "${peer_forward_file}" ]; then
+  current_file="${PEER_FORWARD_DIR}/${name}.conf"
+  destination_file="${PEER_FORWARD_DIR}/${new_name}.conf"
+  if [ "${mode}" = "add" ] && [ -e "${destination_file}" ]; then
     die "peer-forward already exists: ${name}"
   fi
-  if [ "${mode}" = "update" ] && [ ! -e "${peer_forward_file}" ]; then
+  if [ "${mode}" = "update" ] && [ ! -e "${current_file}" ]; then
     die "peer-forward does not exist: ${name}"
   fi
+  if [ "${mode}" = "update" ] && [ "${new_name}" != "${name}" ] && [ -e "${destination_file}" ]; then
+    die "peer-forward already exists: ${new_name}"
+  fi
 
-  temporary_file="$(mktemp "${PEER_FORWARD_DIR}/.${name}.XXXXXX")"
+  temporary_file="$(mktemp "${PEER_FORWARD_DIR}/.${new_name}.XXXXXX")"
   backup_file=""
   {
     printf 'PROTOCOL=%s\n' "${protocol}"
-    printf 'SOURCE_ADDRESS=%s\n' "${source_address}"
+    printf 'SOURCE_ADDRESSES=%s\n' "${source_addresses_text}"
     printf 'TARGET_ADDRESS=%s\n' "${target_address}"
     printf 'TARGET_PORT=%s\n' "${target_port}"
   } >"${temporary_file}"
 
-  if [ -e "${peer_forward_file}" ]; then
+  if [ -e "${current_file}" ]; then
     backup_file="$(mktemp "${PEER_FORWARD_DIR}/.${name}.backup.XXXXXX")"
-    cp "${peer_forward_file}" "${backup_file}"
+    cp "${current_file}" "${backup_file}"
   fi
-  install -o root -g root -m 0600 "${temporary_file}" "${peer_forward_file}"
+  install -o root -g root -m 0600 "${temporary_file}" "${destination_file}"
   rm -f "${temporary_file}"
+  if [ "${destination_file}" != "${current_file}" ]; then
+    rm -f "${current_file}"
+  fi
 
   if ! firewall_sync; then
     log "peer-forward change failed; restoring the previous configuration"
     if [ -n "${backup_file}" ]; then
-      install -o root -g root -m 0600 "${backup_file}" "${peer_forward_file}"
+      if [ "${destination_file}" != "${current_file}" ]; then
+        rm -f "${destination_file}"
+      fi
+      install -o root -g root -m 0600 "${backup_file}" "${current_file}"
     else
-      rm -f "${peer_forward_file}"
+      rm -f "${destination_file}"
     fi
     firewall_sync || true
     rm -f "${backup_file}"
@@ -850,7 +953,11 @@ apply_peer_forward() {
   else
     action_label="updated"
   fi
-  log "${action_label} peer-forward ${name}: ${source_address} -> ${target_address} ${protocol}/${target_port}"
+  if [ "${name}" = "${new_name}" ]; then
+    log "${action_label} peer-forward ${name}: ${source_addresses_text:-no sources} -> ${target_address} ${protocol}/${target_port}"
+  else
+    log "${action_label} peer-forward ${name} -> ${new_name}: ${source_addresses_text:-no sources} -> ${target_address} ${protocol}/${target_port}"
+  fi
 }
 
 delete_peer_forward() {
@@ -879,18 +986,134 @@ delete_peer_forward() {
 }
 
 list_peer_forwards() {
-  local peer_forward_file name protocol source_address target_address target_port
+  local peer_forward_file name protocol source_addresses target_address target_port
   ensure_initialized
-  printf 'NAME\tPROTOCOL\tSOURCE\tTARGET\n'
+  printf 'NAME\tPROTOCOL\tSOURCES\tTARGET\n'
   for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
     [ -f "${peer_forward_file}" ] || continue
     name="$(basename "${peer_forward_file}" .conf)"
     protocol="$(read_forward_setting PROTOCOL "${peer_forward_file}")"
-    source_address="$(read_forward_setting SOURCE_ADDRESS "${peer_forward_file}")"
+    source_addresses="$(read_peer_forward_sources "${peer_forward_file}")"
     target_address="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
     target_port="$(read_forward_setting TARGET_PORT "${peer_forward_file}")"
-    printf '%s\t%s\t%s\t%s:%s\n' "${name}" "${protocol}" "${source_address}" "${target_address}" "${target_port}"
+    printf '%s\t%s\t%s\t%s:%s\n' "${name}" "${protocol}" "${source_addresses}" "${target_address}" "${target_port}"
   done
+}
+
+render_peer_forward_with_sources() {
+  local source_file="$1"
+  local source_addresses="$2"
+  local output_file="$3"
+  local protocol target_address target_port
+  protocol="$(read_forward_setting PROTOCOL "${source_file}")"
+  target_address="$(read_forward_setting TARGET_ADDRESS "${source_file}")"
+  target_port="$(read_forward_setting TARGET_PORT "${source_file}")"
+  {
+    printf 'PROTOCOL=%s\n' "${protocol}"
+    printf 'SOURCE_ADDRESSES=%s\n' "${source_addresses}"
+    printf 'TARGET_ADDRESS=%s\n' "${target_address}"
+    printf 'TARGET_PORT=%s\n' "${target_port}"
+  } >"${output_file}"
+  chmod 0600 "${output_file}"
+}
+
+assign_peer_forward_source() {
+  local source_address="${1:-}"
+  shift || true
+  local peer_forward_file preset_name desired_name target_address current_sources next_sources current_source
+  local staged_file backup_file
+  local should_assign has_source install_failed=false
+  local -a desired_names=("$@") peer_sources=() changed_files=() staged_files=() backup_files=()
+
+  ensure_initialized
+  [ -n "${source_address}" ] || die "peer-forward assign-source requires SOURCE_IPV4"
+  validate_target_address "${source_address}"
+  ensure_registered_peer_address "${source_address}"
+
+  for preset_name in "${desired_names[@]}"; do
+    validate_name "${preset_name}"
+    peer_forward_file="${PEER_FORWARD_DIR}/${preset_name}.conf"
+    [ -f "${peer_forward_file}" ] || die "peer-forward does not exist: ${preset_name}"
+    target_address="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
+    [ "${source_address}" != "${target_address}" ] ||
+      die "peer-forward ${preset_name} targets the selected source peer"
+  done
+
+  for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
+    [ -f "${peer_forward_file}" ] || continue
+    preset_name="$(basename "${peer_forward_file}" .conf)"
+    current_sources="$(read_peer_forward_sources "${peer_forward_file}")"
+    should_assign=false
+    for desired_name in "${desired_names[@]}"; do
+      if [ "${desired_name}" = "${preset_name}" ]; then
+        should_assign=true
+        break
+      fi
+    done
+
+    next_sources=""
+    has_source=false
+    IFS=',' read -r -a peer_sources <<<"${current_sources}"
+    for current_source in "${peer_sources[@]}"; do
+      [ -n "${current_source}" ] || continue
+      if [ "${current_source}" = "${source_address}" ]; then
+        has_source=true
+        ${should_assign} || continue
+      fi
+      if [ -n "${next_sources}" ]; then
+        next_sources="${next_sources},${current_source}"
+      else
+        next_sources="${current_source}"
+      fi
+    done
+    if ${should_assign} && ! ${has_source}; then
+      if [ -n "${next_sources}" ]; then
+        next_sources="${next_sources},${source_address}"
+      else
+        next_sources="${source_address}"
+      fi
+    fi
+    [ "${next_sources}" != "${current_sources}" ] || continue
+
+    staged_file="$(mktemp "${PEER_FORWARD_DIR}/.${preset_name}.staged.XXXXXX")"
+    backup_file="$(mktemp "${PEER_FORWARD_DIR}/.${preset_name}.backup.XXXXXX")"
+    changed_files+=("${peer_forward_file}")
+    staged_files+=("${staged_file}")
+    backup_files+=("${backup_file}")
+    cp "${peer_forward_file}" "${backup_file}"
+    render_peer_forward_with_sources \
+      "${peer_forward_file}" \
+      "${next_sources}" \
+      "${staged_file}"
+  done
+
+  if [ "${#changed_files[@]}" -eq 0 ]; then
+    log "peer-forward assignments already match for ${source_address}"
+    return
+  fi
+
+  local index
+  for index in "${!changed_files[@]}"; do
+    if ! install -o root -g root -m 0600 \
+      "${staged_files[${index}]}" "${changed_files[${index}]}"; then
+      install_failed=true
+      break
+    fi
+  done
+
+  if ${install_failed} || ! firewall_sync; then
+    log "peer-forward assignment failed; restoring the previous configuration"
+    for index in "${!changed_files[@]}"; do
+      install -o root -g root -m 0600 \
+        "${backup_files[${index}]}" "${changed_files[${index}]}" || true
+    done
+    firewall_sync || true
+    rm -f "${staged_files[@]}" "${backup_files[@]}"
+    die "could not apply peer-forward assignments"
+  fi
+
+  rm -f "${staged_files[@]}" "${backup_files[@]}"
+  log "updated peer-forward assignments for ${source_address}: ${desired_names[*]:-none}"
 }
 
 peer_forward_status() {
@@ -913,6 +1136,10 @@ peer_forward_command() {
       [ "$#" -eq 1 ] || die "usage: wg-relay peer-forward delete NAME"
       delete_peer_forward "$1"
       ;;
+    assign-source)
+      [ "$#" -ge 1 ] || die "usage: wg-relay peer-forward assign-source SOURCE_IPV4 [NAME...]"
+      assign_peer_forward_source "$@"
+      ;;
     list)
       [ "$#" -eq 0 ] || die "usage: wg-relay peer-forward list"
       list_peer_forwards
@@ -921,7 +1148,7 @@ peer_forward_command() {
       [ "$#" -eq 0 ] || die "usage: wg-relay peer-forward status"
       peer_forward_status
       ;;
-    *) die "usage: wg-relay peer-forward add|update|delete|list|status ..." ;;
+    *) die "usage: wg-relay peer-forward add|update|assign-source|delete|list|status ..." ;;
   esac
 }
 
@@ -1033,6 +1260,10 @@ main() {
     add | update)
       [ "$#" -eq 3 ] && [ "$2" = "--address" ] || die "usage: wg-relay ${command_name} NAME --address IPV4/32"
       apply_peer "${command_name}" "$1" "$3"
+      ;;
+    rename)
+      [ "$#" -eq 2 ] || die "usage: wg-relay rename CURRENT_NAME NEW_NAME"
+      rename_peer "$1" "$2"
       ;;
     delete)
       [ "$#" -eq 1 ] || die "usage: wg-relay delete NAME"

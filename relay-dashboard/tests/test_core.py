@@ -12,6 +12,7 @@ from dashboard.core import (
     CommandResult,
     ConflictError,
     DashboardError,
+    PeerAccessPreset,
     PeerAccessRule,
     RelayManager,
     Route,
@@ -920,14 +921,18 @@ class WireGuardManagementTests(unittest.TestCase):
             "  latest handshake: 42 seconds ago\n"
             "  transfer: 1.2 MiB received, 3.4 MiB sent\n"
         )
-        rules = parse_peer_access_rules(
-            "NAME\tPROTOCOL\tSOURCE\tTARGET\n"
-            "mac-to-dashboard\ttcp\t10.99.0.3\t10.99.0.2:8081\n"
+        presets = parse_peer_access_rules(
+            "NAME\tPROTOCOL\tSOURCES\tTARGET\n"
+            "dashboard\ttcp\t10.99.0.3,10.99.0.5\t10.99.0.2:8081\n"
         )
 
         self.assertEqual(peers["windows-minibox"].address, "10.99.0.2")
         self.assertEqual(statuses["mac-key"]["latest_handshake"], "42 seconds ago")
-        self.assertEqual(rules["mac-to-dashboard"].target_port, 8081)
+        self.assertEqual(presets["dashboard"].target_port, 8081)
+        self.assertEqual(
+            presets["dashboard"].source_addresses,
+            ("10.99.0.3", "10.99.0.5"),
+        )
 
     def test_validates_and_suggests_peer_addresses(self) -> None:
         peers = [
@@ -971,6 +976,89 @@ class WireGuardManagementTests(unittest.TestCase):
                 }
             )
 
+    def test_validates_reusable_peer_access_preset(self) -> None:
+        preset = PeerAccessPreset.from_mapping(
+            {
+                "name": "dashboard",
+                "protocol": "TCP",
+                "source_addresses": ["10.99.0.5", "10.99.0.3", "10.99.0.3"],
+                "target_address": "10.99.0.2",
+                "target_port": "8081",
+            }
+        )
+
+        self.assertEqual(preset.protocol, "tcp")
+        self.assertEqual(preset.source_addresses, ("10.99.0.3", "10.99.0.5"))
+        self.assertEqual(
+            PeerAccessPreset.from_mapping(
+                {
+                    "name": "unused-dashboard",
+                    "protocol": "tcp",
+                    "target_address": "10.99.0.2",
+                    "target_port": 8081,
+                }
+            ).source_addresses,
+            (),
+        )
+        with self.assertRaises(ValidationError):
+            PeerAccessPreset.from_mapping(
+                {
+                    "name": "same-peer",
+                    "protocol": "tcp",
+                    "source_addresses": ["10.99.0.2"],
+                    "target_address": "10.99.0.2",
+                    "target_port": 8081,
+                }
+            )
+
+    def test_wireguard_state_groups_sources_under_reusable_presets(self) -> None:
+        def runner(
+            command: list[str],
+            environment: dict[str, str],
+            cwd: Path | None,
+            timeout: int,
+        ) -> CommandResult:
+            arguments = command[2:]
+            if arguments == ["list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tADDRESS\tPUBLIC_KEY\n"
+                    "windows\t10.99.0.2/32\twindows-key\n"
+                    "mac\t10.99.0.3/32\tmac-key\n"
+                    "iphone\t10.99.0.5/32\tiphone-key\n",
+                    "",
+                )
+            if arguments == ["status"]:
+                return CommandResult(0, "interface: wg0\n", "")
+            if arguments == ["peer-forward", "list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tPROTOCOL\tSOURCES\tTARGET\n"
+                    "dashboard\ttcp\t10.99.0.3,10.99.0.5\t10.99.0.2:8081\n",
+                    "",
+                )
+            raise AssertionError(arguments)
+
+        state = RelayManager(
+            Path("/workspace/scripts/wg-relay.sh"),
+            "oci-relay",
+            runner,
+        ).wireguard_state(
+            "10.99.0.0/24",
+            "10.99.0.1",
+            "10.99.0.2",
+            8081,
+        )
+
+        peers = {peer["name"]: peer for peer in state["peers"]}
+        self.assertEqual(peers["mac"]["access_presets"], ["dashboard"])
+        self.assertEqual(peers["iphone"]["access_presets"], ["dashboard"])
+        self.assertEqual(peers["windows"]["target_presets"], ["dashboard"])
+        self.assertEqual(
+            state["access_presets"][0]["source_addresses"],
+            ("10.99.0.3", "10.99.0.5"),
+        )
+
     def test_manager_generates_peer_config_on_stdout_and_access_commands(self) -> None:
         commands: list[list[str]] = []
 
@@ -1004,6 +1092,10 @@ class WireGuardManagementTests(unittest.TestCase):
             "10.99.0.1",
         )
         rotated_name, rotated_config = manager.rotate_peer("laptop")
+        previous_name, renamed_name = manager.rename_peer(
+            "laptop",
+            "work-laptop",
+        )
         rule = PeerAccessRule(
             "laptop-to-dashboard",
             "tcp",
@@ -1014,9 +1106,20 @@ class WireGuardManagementTests(unittest.TestCase):
         manager.create_peer_access_rule(rule)
         manager.update_peer_access_rule(rule)
         manager.delete_peer_access_rule(rule.name)
+        preset = PeerAccessPreset(
+            "dashboard",
+            "tcp",
+            "10.99.0.2",
+            8081,
+            ("10.99.0.4", "10.99.0.5"),
+        )
+        manager.create_peer_access_preset(preset)
+        manager.set_peer_access_presets("laptop", ["dashboard"])
 
         self.assertEqual(name, "laptop")
         self.assertEqual(rotated_name, "laptop")
+        self.assertEqual(previous_name, "laptop")
+        self.assertEqual(renamed_name, "work-laptop")
         self.assertTrue(config.endswith("\n"))
         self.assertTrue(rotated_config.startswith("[Interface]"))
         self.assertIn(
@@ -1028,6 +1131,32 @@ class WireGuardManagementTests(unittest.TestCase):
                 "--output",
                 "-",
             ],
+            commands,
+        )
+        self.assertIn(
+            ["rename", "laptop", "work-laptop"],
+            commands,
+        )
+        self.assertIn(
+            [
+                "peer-forward",
+                "add",
+                "dashboard",
+                "--protocol",
+                "tcp",
+                "--source-address",
+                "10.99.0.4",
+                "--source-address",
+                "10.99.0.5",
+                "--target-address",
+                "10.99.0.2",
+                "--target-port",
+                "8081",
+            ],
+            commands,
+        )
+        self.assertIn(
+            ["peer-forward", "assign-source", "10.99.0.4", "dashboard"],
             commands,
         )
         self.assertIn(
@@ -1047,8 +1176,173 @@ class WireGuardManagementTests(unittest.TestCase):
             commands,
         )
 
+    def test_renames_access_preset_while_preserving_peer_assignments(self) -> None:
+        commands: list[list[str]] = []
+
+        def runner(
+            command: list[str],
+            environment: dict[str, str],
+            cwd: Path | None,
+            timeout: int,
+        ) -> CommandResult:
+            arguments = command[2:]
+            commands.append(arguments)
+            if arguments == ["peer-forward", "list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tPROTOCOL\tSOURCES\tTARGET\n"
+                    "dashboard\ttcp\t10.99.0.3,10.99.0.5\t10.99.0.2:8081\n",
+                    "",
+                )
+            return CommandResult(0, "", "")
+
+        manager = RelayManager(
+            Path("/workspace/scripts/wg-relay.sh"),
+            "oci-relay",
+            runner,
+        )
+        manager.update_peer_access_preset_definition(
+            "dashboard",
+            PeerAccessPreset(
+                "relay-dashboard",
+                "tcp",
+                "10.99.0.2",
+                8443,
+            ),
+        )
+
+        self.assertIn(
+            [
+                "peer-forward",
+                "update",
+                "dashboard",
+                "--protocol",
+                "tcp",
+                "--new-name",
+                "relay-dashboard",
+                "--source-address",
+                "10.99.0.3",
+                "--source-address",
+                "10.99.0.5",
+                "--target-address",
+                "10.99.0.2",
+                "--target-port",
+                "8443",
+            ],
+            commands,
+        )
+
+    def test_rejects_peer_rename_to_an_existing_name(self) -> None:
+        def runner(
+            command: list[str],
+            environment: dict[str, str],
+            cwd: Path | None,
+            timeout: int,
+        ) -> CommandResult:
+            arguments = command[2:]
+            if arguments == ["list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tADDRESS\tPUBLIC_KEY\n"
+                    "laptop\t10.99.0.4/32\tlaptop-key\n"
+                    "iphone\t10.99.0.5/32\tiphone-key\n",
+                    "",
+                )
+            raise AssertionError(arguments)
+
+        manager = RelayManager(
+            Path("/workspace/scripts/wg-relay.sh"),
+            "oci-relay",
+            runner,
+        )
+        with self.assertRaisesRegex(ConflictError, "すでに使用されています"):
+            manager.rename_peer("laptop", "iphone")
+
+    def test_rejects_access_preset_rename_to_an_existing_name(self) -> None:
+        def runner(
+            command: list[str],
+            environment: dict[str, str],
+            cwd: Path | None,
+            timeout: int,
+        ) -> CommandResult:
+            arguments = command[2:]
+            if arguments == ["peer-forward", "list"]:
+                return CommandResult(
+                    0,
+                    "NAME\tPROTOCOL\tSOURCES\tTARGET\n"
+                    "dashboard\ttcp\t10.99.0.3\t10.99.0.2:8081\n"
+                    "rdp\ttcp\t10.99.0.5\t10.99.0.2:3389\n",
+                    "",
+                )
+            raise AssertionError(arguments)
+
+        manager = RelayManager(
+            Path("/workspace/scripts/wg-relay.sh"),
+            "oci-relay",
+            runner,
+        )
+        with self.assertRaisesRegex(ConflictError, "すでに使用されています"):
+            manager.update_peer_access_preset_definition(
+                "dashboard",
+                PeerAccessPreset("rdp", "tcp", "10.99.0.2", 8081),
+            )
+
 
 class RelayScriptTests(unittest.TestCase):
+    def test_passes_peer_preset_assignment_to_remote_manager(self) -> None:
+        project_root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            binary_directory = temporary / "bin"
+            binary_directory.mkdir()
+            capture = temporary / "ssh-arguments"
+            fake_ssh = binary_directory / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                'printf "%s\\n" "$@" >"$WG_RELAY_TEST_CAPTURE"\n',
+                encoding="utf-8",
+            )
+            fake_ssh.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "HOME": str(temporary),
+                    "PATH": f"{binary_directory}:{environment['PATH']}",
+                    "WG_RELAY_TEST_CAPTURE": str(capture),
+                }
+            )
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(project_root / "scripts/wg-relay.sh"),
+                    "peer-forward",
+                    "assign-source",
+                    "10.99.0.3",
+                    "dashboard",
+                    "rdp",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                capture.read_text(encoding="utf-8").splitlines(),
+                [
+                    "oci-relay",
+                    "sudo",
+                    "/usr/local/sbin/wg-relay",
+                    "peer-forward",
+                    "assign-source",
+                    "10.99.0.3",
+                    "dashboard",
+                    "rdp",
+                ],
+            )
+
     def test_uses_runtime_home_ssh_config(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as directory:

@@ -1282,6 +1282,47 @@ td.description-cell {
   line-height: 1.5;
 }
 
+.preset-assignment-list {
+  display: grid;
+  gap: 9px;
+  max-height: min(50vh, 430px);
+  overflow-y: auto;
+}
+
+.preset-assignment-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: #0a1512;
+  cursor: pointer;
+}
+
+.preset-assignment-row:has(input:checked) {
+  border-color: rgb(133 240 180 / 40%);
+  background: rgb(133 240 180 / 6%);
+}
+
+.preset-assignment-row span,
+.preset-assignment-row strong,
+.preset-assignment-row small {
+  display: block;
+}
+
+.preset-assignment-row strong {
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.preset-assignment-row small {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+}
+
 .wireguard-error {
   min-height: 18px;
   margin: 12px 2px 0;

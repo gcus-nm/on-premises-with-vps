@@ -250,8 +250,8 @@
               <p class="eyebrow">PRIVATE NETWORK CONTROL</p>
               <h2 id="wireguard-heading">WireGuard管理</h2>
               <p>
-                Peer、鍵、Peer間アクセスをOCIへ即時反映し、iPhoneなどの接続設定を
-                QRコードまたは構成ファイルで一度だけ発行します。
+                Peer、鍵、再利用できるアクセスプリセットをOCIへ即時反映し、iPhoneなどの
+                接続設定をQRコードまたは構成ファイルで一度だけ発行します。
               </p>
             </div>
             <button class="button button-quiet" id="wireguard-refresh-button" type="button">
@@ -282,14 +282,14 @@
               <div class="panel-heading compact">
                 <div>
                   <p class="eyebrow">PEER ACCESS CONTROL</p>
-                  <h2>Peer間アクセス</h2>
+                  <h2>アクセスプリセット</h2>
                 </div>
                 <button class="button button-primary" id="new-access-rule-button" type="button">
-                  ＋ アクセス
+                  ＋ プリセット
                 </button>
               </div>
               <p class="panel-note">
-                OCIのWireGuard ACLへ即時反映します。公開NSGやTerraformは変更しません。
+                接続先とポートを一度登録し、各Peerへ割り当てます。公開NSGやTerraformは変更しません。
               </p>
               <div class="wireguard-list" id="wireguard-access-list">
                 <p class="muted">読み込み中です。</p>
@@ -582,7 +582,7 @@
         <div class="dialog-heading">
           <div>
             <p class="eyebrow">WIREGUARD PEER</p>
-            <h2>Peerを追加</h2>
+            <h2 id="peer-dialog-title">Peerを追加</h2>
           </div>
           <button
             class="icon-button"
@@ -592,6 +592,7 @@
             formnovalidate
           >×</button>
         </div>
+        <input type="hidden" id="peer-original-name">
         <div class="dialog-fields">
           <label>
             <span>端末名（Peer名）</span>
@@ -610,9 +611,9 @@
             <input id="peer-address" required placeholder="10.99.0.4" autocomplete="off">
             <small>空きアドレスを自動入力します。設定ファイルでは/32になります。</small>
           </label>
-          <div class="secret-notice">
-            <strong>接続設定とQRコードは発行時だけ表示されます</strong>
-            <p>
+          <div class="secret-notice" id="peer-secret-notice">
+            <strong id="peer-secret-notice-title">接続設定とQRコードは発行時だけ表示されます</strong>
+            <p id="peer-secret-notice-text">
               秘密鍵はOCI・管理画面・Dockerボリュームへ保存しません。
               紛失した場合は鍵を更新して再発行してください。
             </p>
@@ -691,8 +692,8 @@
       <form method="dialog" id="access-rule-form">
         <div class="dialog-heading">
           <div>
-            <p class="eyebrow">PEER ACCESS RULE</p>
-            <h2 id="access-rule-dialog-title">Peer間アクセスを追加</h2>
+            <p class="eyebrow">PEER ACCESS PRESET</p>
+            <h2 id="access-rule-dialog-title">アクセスプリセットを追加</h2>
           </div>
           <button
             class="icon-button"
@@ -705,26 +706,20 @@
         <input type="hidden" id="access-rule-original-name">
         <div class="dialog-fields">
           <label>
-            <span>ルール名</span>
+            <span>プリセット名</span>
             <input
               id="access-rule-name"
               required
               maxlength="32"
               pattern="[a-z0-9][a-z0-9-]{0,31}"
-              placeholder="laptop2-to-dashboard"
+              placeholder="dashboard"
               autocomplete="off"
             >
           </label>
-          <div class="field-grid">
-            <label>
-              <span>接続元Peer</span>
-              <select id="access-source" required></select>
-            </label>
-            <label>
-              <span>接続先Peer</span>
-              <select id="access-target" required></select>
-            </label>
-          </div>
+          <label>
+            <span>接続先Peer</span>
+            <select id="access-target" required></select>
+          </label>
           <div class="field-grid">
             <label>
               <span>プロトコル</span>
@@ -739,8 +734,9 @@
             </label>
           </div>
           <p class="muted">
-            保存・更新するとOCIへ即時反映されます。Windows側ではWireGuardサブネットから
-            対象ローカルアドレス・ポートへの受信をFirewallで許可してください。
+            編集時にプリセット名を変更しても、既存のPeer割り当ては維持されます。
+            プリセット登録後、Peer一覧の「プリセット割り当て」で接続元を選びます。
+            Windows側ではWireGuardサブネットから対象ポートへの受信をFirewallで許可してください。
           </p>
         </div>
         <p class="form-error" id="access-rule-form-error" role="alert"></p>
@@ -749,7 +745,41 @@
             キャンセル
           </button>
           <button class="button button-primary" id="save-access-rule-button" type="button">
-            OCIへ反映
+            プリセットを保存
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="peer-access-dialog">
+      <form method="dialog" id="peer-access-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">PEER PRESET ASSIGNMENT</p>
+            <h2 id="peer-access-dialog-title">アクセスプリセットを割り当て</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            aria-label="閉じる"
+            type="submit"
+            formnovalidate
+          >×</button>
+        </div>
+        <input type="hidden" id="peer-access-name">
+        <div class="dialog-fields">
+          <p class="muted">
+            このPeerから利用を許可する接続先を選択します。保存するとOCIのACLへ一括反映されます。
+          </p>
+          <div class="preset-assignment-list" id="peer-access-preset-list"></div>
+        </div>
+        <p class="form-error" id="peer-access-form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="button button-quiet" value="cancel" type="submit" formnovalidate>
+            キャンセル
+          </button>
+          <button class="button button-primary" id="save-peer-access-button" type="button">
+            割り当てを保存
           </button>
         </div>
       </form>

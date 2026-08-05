@@ -22,6 +22,7 @@ from dashboard.core import (
     ConflictError,
     DashboardError,
     IdempotencyStore,
+    PeerAccessPreset,
     PeerAccessRule,
     RelayManager,
     Route,
@@ -32,6 +33,7 @@ from dashboard.core import (
     WebRouteStore,
     WireGuardQrEncoder,
     hash_basic_auth_password,
+    normalize_wireguard_name,
     preflight_checks,
 )
 
@@ -423,6 +425,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 finally:
                     self.app.operation_lock.release()
                 return
+            if path == "/api/wireguard/access-presets":
+                if not self.acquire_operation():
+                    return
+                try:
+                    preset = PeerAccessPreset.from_mapping(
+                        {**payload, "source_addresses": []},
+                        self.app.relay_network,
+                        self.app.relay_address,
+                    )
+                    self.app.relay.create_peer_access_preset(preset)
+                    self.app.audit.append(
+                        "wireguard-access-preset-create",
+                        "success",
+                        preset.name,
+                    )
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "message": (
+                                f"アクセスプリセット「{preset.name}」を追加しました。"
+                            ),
+                        },
+                        HTTPStatus.CREATED,
+                    )
+                finally:
+                    self.app.operation_lock.release()
+                return
             if path == "/api/web-gateway/setup":
                 if not self.acquire_operation():
                     return
@@ -644,6 +673,114 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self.read_json()
+            peer_access_suffix = "/access-presets"
+            peer_prefix = "/api/wireguard/peers/"
+            if path.startswith(peer_prefix) and path.endswith(peer_access_suffix):
+                name = unquote(
+                    path[len(peer_prefix) : -len(peer_access_suffix)]
+                )
+                peer_name, preset_names = self.app.relay.set_peer_access_presets(
+                    name,
+                    payload.get("preset_names"),
+                )
+                self.app.audit.append(
+                    "wireguard-peer-access-presets-update",
+                    "success",
+                    f"{peer_name}: {', '.join(preset_names) or '割り当てなし'}",
+                )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": (
+                            f"Peer「{peer_name}」のアクセスプリセットを更新しました。"
+                        ),
+                        "peer_name": peer_name,
+                        "preset_names": preset_names,
+                    }
+                )
+                return
+            if path.startswith(peer_prefix):
+                current_name, new_name = self.app.relay.rename_peer(
+                    unquote(path[len(peer_prefix) :]),
+                    payload.get("name"),
+                )
+                audit_detail = (
+                    new_name
+                    if new_name == current_name
+                    else f"{current_name} -> {new_name}"
+                )
+                self.app.audit.append(
+                    "wireguard-peer-rename",
+                    "success",
+                    audit_detail,
+                )
+                if new_name == current_name:
+                    message = f"WireGuard Peer名は「{new_name}」のままです。"
+                else:
+                    message = (
+                        f"WireGuard Peer名を「{current_name}」から"
+                        f"「{new_name}」へ変更しました。"
+                    )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": message,
+                        "name": new_name,
+                        "previous_name": current_name,
+                    }
+                )
+                return
+            preset_prefix = "/api/wireguard/access-presets/"
+            if path.startswith(preset_prefix):
+                current_name = normalize_wireguard_name(
+                    unquote(path[len(preset_prefix) :]),
+                    "アクセスプリセット名",
+                    existing=True,
+                )
+                requested_name = payload.get("name", current_name)
+                preset = PeerAccessPreset.from_mapping(
+                    {
+                        **payload,
+                        "name": requested_name,
+                        "source_addresses": [],
+                    },
+                    self.app.relay_network,
+                    self.app.relay_address,
+                    existing_name=(
+                        isinstance(requested_name, str)
+                        and requested_name.strip() == current_name
+                    ),
+                )
+                self.app.relay.update_peer_access_preset_definition(
+                    current_name,
+                    preset,
+                )
+                audit_detail = (
+                    preset.name
+                    if preset.name == current_name
+                    else f"{current_name} -> {preset.name}"
+                )
+                self.app.audit.append(
+                    "wireguard-access-preset-update",
+                    "success",
+                    audit_detail,
+                )
+                if preset.name == current_name:
+                    message = f"アクセスプリセット「{preset.name}」を更新しました。"
+                else:
+                    message = (
+                        f"アクセスプリセット名を「{current_name}」から"
+                        f"「{preset.name}」へ変更しました。"
+                    )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": message,
+                        "name": preset.name,
+                        "previous_name": current_name,
+                    }
+                )
+                return
             access_prefix = "/api/wireguard/access-rules/"
             if path.startswith(access_prefix):
                 name = unquote(path[len(access_prefix) :])
@@ -794,6 +931,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             peer_prefix = "/api/wireguard/peers/"
+            preset_prefix = "/api/wireguard/access-presets/"
             access_prefix = "/api/wireguard/access-rules/"
             if path.startswith(peer_prefix):
                 name = unquote(path[len(peer_prefix) :])
@@ -811,6 +949,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "message": f"WireGuard Peer「{deleted_name}」を削除しました。",
+                    }
+                )
+                return
+            if path.startswith(preset_prefix):
+                if payload.get("confirmation") != "DELETE":
+                    raise ValidationError(
+                        "アクセスプリセットを削除するにはDELETEと入力してください。"
+                    )
+                name = unquote(path[len(preset_prefix) :])
+                deleted_name = self.app.relay.delete_peer_access_preset(name)
+                self.app.audit.append(
+                    "wireguard-access-preset-delete",
+                    "success",
+                    deleted_name,
+                )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": (
+                            f"アクセスプリセット「{deleted_name}」を削除しました。"
+                        ),
                     }
                 )
                 return

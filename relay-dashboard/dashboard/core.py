@@ -353,6 +353,70 @@ class PeerAccessRule:
 
 
 @dataclass(frozen=True)
+class PeerAccessPreset:
+    name: str
+    protocol: str
+    target_address: str
+    target_port: int
+    source_addresses: tuple[str, ...] = ()
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: dict[str, Any],
+        relay_network: str = "10.99.0.0/24",
+        relay_address: str = "10.99.0.1",
+        *,
+        existing_name: bool = False,
+    ) -> "PeerAccessPreset":
+        name = normalize_wireguard_name(
+            value.get("name"),
+            "アクセスプリセット名",
+            existing=existing_name,
+        )
+        protocol = str(value.get("protocol", "")).strip().lower()
+        if protocol not in {"tcp", "udp"}:
+            raise ValidationError("プロトコルはTCPまたはUDPにしてください。")
+        target_address = normalize_peer_ip(
+            value.get("target_address"),
+            "接続先アドレス",
+            relay_network,
+            relay_address,
+        )
+
+        raw_sources = value.get("source_addresses")
+        legacy_source = value.get("source_address")
+        if raw_sources is None and legacy_source is not None and legacy_source != "":
+            raw_sources = [legacy_source]
+        if raw_sources is None:
+            raw_sources = []
+        if not isinstance(raw_sources, (list, tuple)):
+            raise ValidationError("接続元アドレス一覧は配列にしてください。")
+
+        sources: list[str] = []
+        for raw_source in raw_sources:
+            source = normalize_peer_ip(
+                raw_source,
+                "接続元アドレス",
+                relay_network,
+                relay_address,
+            )
+            if source == target_address:
+                raise ValidationError("接続元と接続先には異なるPeerを指定してください。")
+            if source not in sources:
+                sources.append(source)
+        sources.sort(key=lambda item: int(ipaddress.ip_address(item)))
+
+        return cls(
+            name=name,
+            protocol=protocol,
+            target_address=target_address,
+            target_port=parse_port(value.get("target_port"), "接続先ポート"),
+            source_addresses=tuple(sources),
+        )
+
+
+@dataclass(frozen=True)
 class CommandResult:
     returncode: int
     stdout: str
@@ -587,8 +651,8 @@ def parse_wireguard_peers(output: str) -> dict[str, WireGuardPeer]:
     return peers
 
 
-def parse_peer_access_rules(output: str) -> dict[str, PeerAccessRule]:
-    rules: dict[str, PeerAccessRule] = {}
+def parse_peer_access_rules(output: str) -> dict[str, PeerAccessPreset]:
+    presets: dict[str, PeerAccessPreset] = {}
     for line_number, raw_line in enumerate(output.splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("NAME\t"):
@@ -596,7 +660,7 @@ def parse_peer_access_rules(output: str) -> dict[str, PeerAccessRule]:
         fields = line.split("\t")
         if len(fields) != 4:
             raise DashboardError(f"Peer間アクセス一覧の{line_number}行目を解析できません。")
-        name, protocol, source_address, target = fields
+        name, protocol, source_addresses_text, target = fields
         if ":" not in target:
             raise DashboardError(f"Peer間アクセスの接続先を解析できません: {target}")
         target_address, target_port_text = target.rsplit(":", 1)
@@ -604,14 +668,30 @@ def parse_peer_access_rules(output: str) -> dict[str, PeerAccessRule]:
             target_port = int(target_port_text)
         except ValueError as exc:
             raise DashboardError(f"Peer間アクセスのポートを解析できません: {line}") from exc
-        rules[name] = PeerAccessRule(
+        try:
+            source_addresses = tuple(
+                sorted(
+                    {
+                        str(ipaddress.ip_address(source.strip()))
+                        for source in source_addresses_text.split(",")
+                        if source.strip()
+                    },
+                    key=lambda item: int(ipaddress.ip_address(item)),
+                )
+            )
+            target_address = str(ipaddress.ip_address(target_address))
+        except ValueError as exc:
+            raise DashboardError(
+                f"Peer間アクセスのアドレスを解析できません: {line}"
+            ) from exc
+        presets[name] = PeerAccessPreset(
             name=name,
             protocol=protocol,
-            source_address=source_address,
             target_address=target_address,
             target_port=target_port,
+            source_addresses=source_addresses,
         )
-    return rules
+    return presets
 
 
 def parse_wireguard_status(output: str) -> dict[str, dict[str, str]]:
@@ -2537,8 +2617,12 @@ class RelayManager:
     def list_peers(self) -> dict[str, WireGuardPeer]:
         return parse_wireguard_peers(self._run(["list"]).stdout)
 
-    def list_peer_access_rules(self) -> dict[str, PeerAccessRule]:
+    def list_peer_access_presets(self) -> dict[str, PeerAccessPreset]:
         return parse_peer_access_rules(self._run(["peer-forward", "list"]).stdout)
+
+    def list_peer_access_rules(self) -> dict[str, PeerAccessPreset]:
+        """Backward-compatible name for callers using the former rule API."""
+        return self.list_peer_access_presets()
 
     def wireguard_state(
         self,
@@ -2549,11 +2633,16 @@ class RelayManager:
     ) -> dict[str, Any]:
         peers = self.list_peers()
         statuses = parse_wireguard_status(self._run(["status"]).stdout)
-        rules = self.list_peer_access_rules()
+        presets = self.list_peer_access_presets()
         references: dict[str, list[str]] = {peer.address: [] for peer in peers.values()}
-        for rule in rules.values():
-            references.setdefault(rule.source_address, []).append(rule.name)
-            references.setdefault(rule.target_address, []).append(rule.name)
+        assigned: dict[str, list[str]] = {peer.address: [] for peer in peers.values()}
+        targets: dict[str, list[str]] = {peer.address: [] for peer in peers.values()}
+        for preset in presets.values():
+            for source_address in preset.source_addresses:
+                references.setdefault(source_address, []).append(preset.name)
+                assigned.setdefault(source_address, []).append(preset.name)
+            references.setdefault(preset.target_address, []).append(preset.name)
+            targets.setdefault(preset.target_address, []).append(preset.name)
         peer_rows = []
         for peer in sorted(
             peers.values(),
@@ -2567,12 +2656,28 @@ class RelayManager:
                     "latest_handshake": status.get("latest_handshake", "未接続"),
                     "transfer": status.get("transfer", ""),
                     "access_rules": sorted(references.get(peer.address, [])),
+                    "access_presets": sorted(assigned.get(peer.address, [])),
+                    "target_presets": sorted(targets.get(peer.address, [])),
                 }
             )
+        preset_rows = [
+            asdict(preset)
+            for preset in sorted(presets.values(), key=lambda item: item.name)
+        ]
         return {
             "peers": peer_rows,
+            "access_presets": preset_rows,
+            # Retained during the access-rule to access-preset API transition.
             "access_rules": [
-                asdict(rule) for rule in sorted(rules.values(), key=lambda item: item.name)
+                {
+                    **row,
+                    "source_address": (
+                        row["source_addresses"][0]
+                        if len(row["source_addresses"]) == 1
+                        else ""
+                    ),
+                }
+                for row in preset_rows
             ],
             "suggested_address": suggest_peer_address(
                 peers.values(),
@@ -2638,53 +2743,182 @@ class RelayManager:
             )
         return normalized_name, result.stdout + "\n"
 
+    def rename_peer(
+        self,
+        current_name: Any,
+        new_name: Any,
+    ) -> tuple[str, str]:
+        normalized_current_name = normalize_wireguard_name(
+            current_name,
+            "現在のPeer名",
+            existing=True,
+        )
+        normalized_new_name = normalize_wireguard_name(new_name, "新しいPeer名")
+        peers = self.list_peers()
+        if normalized_current_name not in peers:
+            raise ValidationError(
+                f"WireGuard Peerが見つかりません: {normalized_current_name}"
+            )
+        if normalized_new_name == normalized_current_name:
+            return normalized_current_name, normalized_new_name
+        if normalized_new_name in peers:
+            raise ConflictError(
+                f"Peer名はすでに使用されています: {normalized_new_name}"
+            )
+        self._run(
+            [
+                "rename",
+                normalized_current_name,
+                normalized_new_name,
+            ]
+        )
+        return normalized_current_name, normalized_new_name
+
     def delete_peer(self, name: Any) -> str:
         normalized_name = normalize_wireguard_name(name, "Peer名", existing=True)
         self._run(["delete", normalized_name, "--yes"])
         return normalized_name
 
     def create_peer_access_rule(self, rule: PeerAccessRule) -> None:
-        self._run(
-            [
-                "peer-forward",
-                "add",
-                rule.name,
-                "--protocol",
-                rule.protocol,
-                "--source-address",
-                rule.source_address,
-                "--target-address",
-                rule.target_address,
-                "--target-port",
-                str(rule.target_port),
-            ]
+        self.create_peer_access_preset(
+            PeerAccessPreset(
+                name=rule.name,
+                protocol=rule.protocol,
+                target_address=rule.target_address,
+                target_port=rule.target_port,
+                source_addresses=(rule.source_address,),
+            )
         )
 
     def update_peer_access_rule(self, rule: PeerAccessRule) -> None:
+        self.update_peer_access_preset(
+            PeerAccessPreset(
+                name=rule.name,
+                protocol=rule.protocol,
+                target_address=rule.target_address,
+                target_port=rule.target_port,
+                source_addresses=(rule.source_address,),
+            )
+        )
+
+    def create_peer_access_preset(self, preset: PeerAccessPreset) -> None:
+        self._run(self._peer_access_preset_arguments("add", preset))
+
+    def update_peer_access_preset(
+        self,
+        preset: PeerAccessPreset,
+        current_name: str | None = None,
+    ) -> None:
+        self._run(
+            self._peer_access_preset_arguments(
+                "update",
+                preset,
+                current_name=current_name,
+            )
+        )
+
+    @staticmethod
+    def _peer_access_preset_arguments(
+        operation: str,
+        preset: PeerAccessPreset,
+        current_name: str | None = None,
+    ) -> list[str]:
+        command_name = current_name or preset.name
+        arguments = [
+            "peer-forward",
+            operation,
+            command_name,
+            "--protocol",
+            preset.protocol,
+        ]
+        if operation == "update" and command_name != preset.name:
+            arguments.extend(["--new-name", preset.name])
+        for source_address in preset.source_addresses:
+            arguments.extend(["--source-address", source_address])
+        arguments.extend(
+            [
+                "--target-address",
+                preset.target_address,
+                "--target-port",
+                str(preset.target_port),
+            ]
+        )
+        return arguments
+
+    def set_peer_access_presets(
+        self,
+        peer_name: Any,
+        preset_names: Any,
+    ) -> tuple[str, tuple[str, ...]]:
+        normalized_peer_name = normalize_wireguard_name(
+            peer_name,
+            "Peer名",
+            existing=True,
+        )
+        if not isinstance(preset_names, list):
+            raise ValidationError("アクセスプリセット一覧は配列にしてください。")
+        normalized_preset_names: list[str] = []
+        for value in preset_names:
+            name = normalize_wireguard_name(
+                value,
+                "アクセスプリセット名",
+                existing=True,
+            )
+            if name not in normalized_preset_names:
+                normalized_preset_names.append(name)
+
+        peers = self.list_peers()
+        peer = peers.get(normalized_peer_name)
+        if peer is None:
+            raise ValidationError(
+                f"WireGuard Peerが見つかりません: {normalized_peer_name}"
+            )
         self._run(
             [
                 "peer-forward",
-                "update",
-                rule.name,
-                "--protocol",
-                rule.protocol,
-                "--source-address",
-                rule.source_address,
-                "--target-address",
-                rule.target_address,
-                "--target-port",
-                str(rule.target_port),
+                "assign-source",
+                peer.address,
+                *normalized_preset_names,
             ]
         )
+        return normalized_peer_name, tuple(normalized_preset_names)
 
-    def delete_peer_access_rule(self, name: Any) -> str:
+    def delete_peer_access_preset(self, name: Any) -> str:
         normalized_name = normalize_wireguard_name(
             name,
-            "アクセスルール名",
+            "アクセスプリセット名",
             existing=True,
         )
         self._run(["peer-forward", "delete", normalized_name, "--yes"])
         return normalized_name
+
+    def update_peer_access_preset_definition(
+        self,
+        current_name: Any,
+        preset: PeerAccessPreset,
+    ) -> None:
+        normalized_current_name = normalize_wireguard_name(
+            current_name,
+            "アクセスプリセット名",
+            existing=True,
+        )
+        presets = self.list_peer_access_presets()
+        current = presets.get(normalized_current_name)
+        if current is None:
+            raise ValidationError(
+                f"アクセスプリセットが見つかりません: {normalized_current_name}"
+            )
+        if preset.name != normalized_current_name and preset.name in presets:
+            raise ConflictError(
+                f"アクセスプリセット名はすでに使用されています: {preset.name}"
+            )
+        self.update_peer_access_preset(
+            replace(preset, source_addresses=current.source_addresses),
+            current_name=normalized_current_name,
+        )
+
+    def delete_peer_access_rule(self, name: Any) -> str:
+        return self.delete_peer_access_preset(name)
 
     def check_conflicts(
         self,
