@@ -1,9 +1,25 @@
+FROM hashicorp/terraform:1.15.8 AS python-dependencies
+
+RUN apk add --no-cache \
+      py3-pip \
+      python3
+
+COPY requirements.txt /tmp/relay-dashboard-requirements.txt
+RUN python3 -m pip install \
+      --no-cache-dir \
+      --no-deps \
+      --require-hashes \
+      --target /opt/relay-python \
+      -r /tmp/relay-dashboard-requirements.txt
+
 FROM hashicorp/terraform:1.15.8
 
 RUN apk add --no-cache \
       bash \
       openssh-client \
       python3
+
+COPY --from=python-dependencies /opt/relay-python/ /opt/relay-python/
 
 WORKDIR /app
 
@@ -19,6 +35,7 @@ ENV DASHBOARD_BIND=0.0.0.0 \
     DASHBOARD_PORT=8080 \
     DASHBOARD_DATA_DIR=/data \
     DASHBOARD_STATIC_DIR=/app/static \
+    PYTHONPATH=/opt/relay-python \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TERRAFORM_WORKSPACE=/workspace

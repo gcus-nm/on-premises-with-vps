@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: OCI Relay Control API
-  version: 1.1.0
+  version: 1.2.0
   description: Private API shared by the Web UI and non-interactive CLI.
 servers:
   - url: http://127.0.0.1:8081
@@ -85,6 +85,81 @@ paths:
         '200':
           description: Relay synchronization result
           content: { application/json: { schema: { type: object } } }
+  /api/wireguard:
+    get:
+      operationId: getWireGuardState
+      responses:
+        '200':
+          description: Peer inventory, live status, access rules, and the next available address
+          content: { application/json: { schema: { type: object } } }
+  /api/wireguard/peers:
+    post:
+      operationId: createWireGuardPeer
+      description: >-
+        Creates a peer immediately. The private client profile and QR image are returned once
+        with Cache-Control no-store and are never persisted by Relay Control.
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, address]
+              properties:
+                name: { type: string, pattern: '^[a-z0-9][a-z0-9-]{0,31}$' }
+                address: { type: string, format: ipv4 }
+      responses:
+        '201':
+          description: Peer created and one-time client artifacts issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WireGuardArtifact' }
+  /api/wireguard/peers/{name}/rotate:
+    post:
+      operationId: rotateWireGuardPeer
+      description: Invalidates the previous client key and issues new one-time artifacts.
+      parameters:
+        - $ref: '#/components/parameters/Csrf'
+        - $ref: '#/components/parameters/PeerName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmation]
+              properties: { confirmation: { const: ROTATE } }
+      responses:
+        '200':
+          description: Peer key rotated and one-time client artifacts issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WireGuardArtifact' }
+  /api/wireguard/peers/{name}:
+    delete:
+      operationId: deleteWireGuardPeer
+      parameters:
+        - $ref: '#/components/parameters/Csrf'
+        - $ref: '#/components/parameters/PeerName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmation]
+              properties:
+                confirmation:
+                  type: string
+                  description: Must exactly match the peer name.
+      responses:
+        '200':
+          description: Peer deleted
+          content: { application/json: { schema: { type: object } } }
 components:
   securitySchemes:
     basicAuth: { type: http, scheme: basic }
@@ -100,6 +175,40 @@ components:
       required: false
       description: CLI requires this for real changes; successful responses are replayable for 24 hours.
       schema: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+    PeerName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 32 }
+  schemas:
+    WireGuardArtifact:
+      type: object
+      additionalProperties: false
+      required:
+        - ok
+        - message
+        - filename
+        - client_config
+        - one_time
+        - qr_filename
+        - qr_svg_base64
+        - qr_warning
+      properties:
+        ok: { const: true }
+        message: { type: string }
+        filename: { type: string }
+        client_config:
+          type: string
+          description: One-time WireGuard profile containing the client private key.
+        one_time: { const: true }
+        qr_filename: { type: string }
+        qr_svg_base64:
+          type: string
+          contentEncoding: base64
+          contentMediaType: image/svg+xml
+        qr_warning:
+          type: string
+          description: Non-empty only when peer creation succeeded but QR generation failed.
   requestBodies:
     Route:
       required: true

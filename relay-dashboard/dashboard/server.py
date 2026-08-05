@@ -30,6 +30,7 @@ from dashboard.core import (
     ValidationError,
     WebRoute,
     WebRouteStore,
+    WireGuardQrEncoder,
     hash_basic_auth_password,
     preflight_checks,
 )
@@ -96,6 +97,7 @@ class AppContext:
         self.audit = AuditLog(self.data_dir)
         self.idempotency = IdempotencyStore(self.data_dir)
         self.relay = RelayManager(relay_script, relay_ssh_host)
+        self.wireguard_qr = WireGuardQrEncoder()
         self.terraform = TerraformManager(self.workspace, self.data_dir)
         # A saved plan must not survive a container restart because its runtime
         # configuration workspace is ephemeral.
@@ -356,12 +358,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         self.app.relay_address,
                     )
                     self.app.audit.append("wireguard-peer-create", "success", name)
+                    artifact = self.wireguard_configuration_payload(
+                        name,
+                        client_config,
+                    )
                     self.send_json(
                         {
                             "ok": True,
                             "message": f"WireGuard Peer「{name}」を追加しました。",
-                            "filename": f"{name}.conf",
-                            "client_config": client_config,
+                            **artifact,
                         },
                         HTTPStatus.CREATED,
                     )
@@ -379,12 +384,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     name = unquote(path[len(peer_prefix) : -len(rotate_suffix)])
                     name, client_config = self.app.relay.rotate_peer(name)
                     self.app.audit.append("wireguard-peer-rotate", "success", name)
+                    artifact = self.wireguard_configuration_payload(
+                        name,
+                        client_config,
+                    )
                     self.send_json(
                         {
                             "ok": True,
                             "message": f"WireGuard Peer「{name}」の鍵を更新しました。",
-                            "filename": f"{name}.conf",
-                            "client_config": client_config,
+                            **artifact,
                         }
                     )
                 finally:
@@ -1090,6 +1098,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
         )
 
+    def wireguard_configuration_payload(
+        self,
+        name: str,
+        client_config: str,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "filename": f"{name}.conf",
+            "client_config": client_config,
+            "one_time": True,
+            "qr_filename": f"{name}-wireguard-qr.svg",
+            "qr_svg_base64": "",
+            "qr_warning": "",
+        }
+        try:
+            svg = self.app.wireguard_qr.generate(client_config)
+            payload["qr_svg_base64"] = base64.b64encode(svg.encode()).decode()
+        except DashboardError as exc:
+            payload["qr_warning"] = (
+                f"{exc} 構成ファイルは取得できます。QRコードが必要な場合は、"
+                "この設定を保存してから鍵を更新せずに管理者へ確認してください。"
+            )
+        except Exception:
+            # Peer creation has already succeeded. Never discard its one-time
+            # client profile because an unexpected QR renderer error occurred.
+            payload["qr_warning"] = (
+                "QRコードを生成できませんでした。構成ファイルは取得できます。"
+                "この設定を保存してから鍵を更新せずに管理者へ確認してください。"
+            )
+        return payload
+
     def acquire_operation(self) -> bool:
         if self.app.operation_lock.acquire(blocking=False):
             return True
@@ -1241,7 +1279,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "connect-src 'self'; img-src 'self'; frame-ancestors 'none'; "
+            "connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; "
             "base-uri 'none'; form-action 'self'",
         )
         self.send_header("X-Content-Type-Options", "nosniff")

@@ -9,6 +9,7 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - HTTPS Webルート（FQDNからDockerネットワークエイリアスへの振り分け）
 - Webルート単位の自動生成Basic認証
 - WireGuard Peerの追加・鍵更新・削除
+- WireGuard構成ファイルとiPhone向けQRコードの一度限りの発行・ダウンロード
 - WireGuard Peer間のTCP/UDPアクセス制御
 
 管理画面はGUIで経路を保存しただけではOCIを変更しません。Terraform planを作成し、内容がOCI NSGの公開ルールだけであることを自動検査した後、確認欄へ`APPLY`と入力した場合だけ反映します。
@@ -27,6 +28,7 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - リポジトリ全体は渡さず、Terraformと管理スクリプトの必要ファイルだけをマウントする
 - コンテナ起動時に資格情報をtmpfsへコピーし、`0600`で使用する
 - 新規・更新したPeerの秘密鍵はディスクへ保存せず、一度だけブラウザへ返す
+- QRコードはコンテナ内でメモリ上の接続設定から生成し、ファイルへ保存しない
 - Docker socketはマウントしない
 - Traefik APIと証明書Volumeはマウントしない
 - Traefik動的設定ディレクトリではマーカー付き`ui-web-routes.yml`だけを更新する
@@ -50,6 +52,7 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - GUI管理経路の追加・更新・有効化・無効化・削除
 - TCP/UDPを混在できるポートグループと最大64ポートの一括追加
 - WireGuard Peerの追加、状態確認、鍵ローテーション、削除
+- WireGuard Peer追加・鍵ローテーション時のQRコードと構成ファイル発行
 - Peer間アクセスルールの追加、更新、削除
 - Terraform planとapply
 - OCIリレー状態、環境チェック、操作履歴

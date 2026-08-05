@@ -4,6 +4,7 @@ import base64
 import configparser
 import hashlib
 import hmac
+import io
 import ipaddress
 import json
 import os
@@ -52,6 +53,40 @@ class CommandError(DashboardError):
     def __init__(self, message: str, output: str = "") -> None:
         super().__init__(message)
         self.output = output
+
+
+class WireGuardQrEncoder:
+    """Generate a scan-ready SVG without persisting the WireGuard profile."""
+
+    def __init__(self, qr_factory: Callable[[str], Any] | None = None) -> None:
+        self.qr_factory = qr_factory or make_wireguard_qr
+
+    def generate(self, client_config: str) -> str:
+        if not client_config.startswith("[Interface]"):
+            raise CommandError("QRコードへ変換できるWireGuard接続設定ではありません。")
+        try:
+            output = io.BytesIO()
+            self.qr_factory(client_config).save(
+                output,
+                kind="svg",
+                scale=8,
+                border=2,
+                xmldecl=False,
+            )
+            svg = output.getvalue().decode("utf-8").strip()
+        except (ImportError, OSError, UnicodeError, ValueError) as exc:
+            raise CommandError("QRコードを生成できませんでした。") from exc
+        if "<svg" not in svg or not svg.endswith("</svg>"):
+            raise CommandError("QRコード生成結果がSVGではありません。")
+        return svg + "\n"
+
+
+def make_wireguard_qr(client_config: str) -> Any:
+    try:
+        import segno
+    except ImportError as exc:
+        raise CommandError("QRコード生成ライブラリを読み込めません。") from exc
+    return segno.make_qr(client_config, error="m", boost_error=False)
 
 
 @dataclass(frozen=True)

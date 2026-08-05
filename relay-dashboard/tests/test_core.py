@@ -21,6 +21,7 @@ from dashboard.core import (
     WebRoute,
     WebRouteStore,
     WireGuardPeer,
+    WireGuardQrEncoder,
     analyze_terraform_plan,
     compact_port_ranges,
     hash_basic_auth_password,
@@ -887,6 +888,25 @@ class RelayParsingTests(unittest.TestCase):
 
 
 class WireGuardManagementTests(unittest.TestCase):
+    def test_generates_wireguard_qr_as_svg_without_a_temporary_file(self) -> None:
+        config = "[Interface]\nPrivateKey = secret\nAddress = 10.99.0.4/32\n"
+
+        class FakeQr:
+            def save(self, output: object, **options: object) -> None:
+                self.options = options
+                output.write(b'<svg xmlns="http://www.w3.org/2000/svg"></svg>')  # type: ignore[attr-defined]
+
+        received: list[str] = []
+
+        def qr_factory(value: str) -> FakeQr:
+            received.append(value)
+            return FakeQr()
+
+        svg = WireGuardQrEncoder(qr_factory).generate(config)
+
+        self.assertTrue(svg.startswith("<svg"))
+        self.assertEqual(received, [config])
+
     def test_parses_peers_status_and_access_rules(self) -> None:
         peers = parse_wireguard_peers(
             "NAME\tADDRESS\tPUBLIC_KEY\n"
