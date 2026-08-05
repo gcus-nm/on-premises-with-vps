@@ -1871,7 +1871,7 @@ function openEditAccessPreset(name) {
   elements.accessRuleForm.reset();
   elements.accessRuleOriginalName.value = preset.name;
   elements.accessRuleName.value = preset.name;
-  elements.accessRuleName.readOnly = true;
+  elements.accessRuleName.readOnly = false;
   elements.accessRuleDialogTitle.textContent = "アクセスプリセットを編集";
   refreshAccessTargetOptions(preset.target_address);
   elements.accessProtocol.value = preset.protocol;

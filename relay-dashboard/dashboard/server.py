@@ -33,6 +33,7 @@ from dashboard.core import (
     WebRouteStore,
     WireGuardQrEncoder,
     hash_basic_auth_password,
+    normalize_wireguard_name,
     preflight_checks,
 )
 
@@ -700,25 +701,52 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             preset_prefix = "/api/wireguard/access-presets/"
             if path.startswith(preset_prefix):
-                name = unquote(path[len(preset_prefix) :])
+                current_name = normalize_wireguard_name(
+                    unquote(path[len(preset_prefix) :]),
+                    "アクセスプリセット名",
+                    existing=True,
+                )
+                requested_name = payload.get("name", current_name)
                 preset = PeerAccessPreset.from_mapping(
-                    {**payload, "name": name, "source_addresses": []},
+                    {
+                        **payload,
+                        "name": requested_name,
+                        "source_addresses": [],
+                    },
                     self.app.relay_network,
                     self.app.relay_address,
-                    existing_name=True,
+                    existing_name=(
+                        isinstance(requested_name, str)
+                        and requested_name.strip() == current_name
+                    ),
                 )
-                self.app.relay.update_peer_access_preset_definition(preset)
+                self.app.relay.update_peer_access_preset_definition(
+                    current_name,
+                    preset,
+                )
+                audit_detail = (
+                    preset.name
+                    if preset.name == current_name
+                    else f"{current_name} -> {preset.name}"
+                )
                 self.app.audit.append(
                     "wireguard-access-preset-update",
                     "success",
-                    preset.name,
+                    audit_detail,
                 )
+                if preset.name == current_name:
+                    message = f"アクセスプリセット「{preset.name}」を更新しました。"
+                else:
+                    message = (
+                        f"アクセスプリセット名を「{current_name}」から"
+                        f"「{preset.name}」へ変更しました。"
+                    )
                 self.send_json(
                     {
                         "ok": True,
-                        "message": (
-                            f"アクセスプリセット「{preset.name}」を更新しました。"
-                        ),
+                        "message": message,
+                        "name": preset.name,
+                        "previous_name": current_name,
                     }
                 )
                 return

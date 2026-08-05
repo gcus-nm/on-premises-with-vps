@@ -177,7 +177,8 @@ paths:
   /api/wireguard/access-presets/{name}:
     put:
       operationId: updateWireGuardAccessPreset
-      description: Updates the destination while preserving all current Peer assignments.
+      description: >-
+        Updates the preset name or destination while preserving all current Peer assignments.
       parameters:
         - $ref: '#/components/parameters/Csrf'
         - $ref: '#/components/parameters/AccessPresetName'

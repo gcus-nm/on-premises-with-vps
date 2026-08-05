@@ -124,6 +124,8 @@ class RouteDialogMarkupTests(unittest.TestCase):
         self.assertIn("showPeerConfiguration", javascript)
         self.assertIn("設定を再発行", javascript)
         self.assertIn("プリセット割り当て", javascript)
+        self.assertNotIn("elements.accessRuleName.readOnly = true", javascript)
+        self.assertIn("既存のPeer割り当ては維持されます", html)
         self.assertIn("QRコードで作成", html)
 
     def test_web_route_management_and_safety_copy_are_present(self) -> None:

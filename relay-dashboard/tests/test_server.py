@@ -626,17 +626,26 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(created_preset.source_addresses, ())
 
         self.app.relay.update_peer_access_preset_definition = Mock()  # type: ignore[method-assign]
-        status, _ = self.request(
+        status, updated = self.request(
             "/api/wireguard/access-presets/dashboard",
             method="PUT",
-            body={**preset_payload, "target_port": 8443},
+            body={
+                **preset_payload,
+                "name": "relay-dashboard",
+                "target_port": 8443,
+            },
             csrf=csrf,
         )
         self.assertEqual(status, 200)
-        updated_preset = (
-            self.app.relay.update_peer_access_preset_definition.call_args.args[0]
+        update_arguments = (
+            self.app.relay.update_peer_access_preset_definition.call_args.args
         )
+        self.assertEqual(update_arguments[0], "dashboard")
+        updated_preset = update_arguments[1]
+        self.assertEqual(updated_preset.name, "relay-dashboard")
         self.assertEqual(updated_preset.target_port, 8443)
+        self.assertEqual(updated["previous_name"], "dashboard")
+        self.assertEqual(updated["name"], "relay-dashboard")
 
         self.app.relay.set_peer_access_presets = Mock(  # type: ignore[method-assign]
             return_value=("mac-admin", ("dashboard", "ssh"))

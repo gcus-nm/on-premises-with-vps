@@ -41,7 +41,7 @@ Usage:
   ./scripts/wg-relay.sh forward list
   ./scripts/wg-relay.sh forward status
   ./scripts/wg-relay.sh peer-forward add NAME --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
-  ./scripts/wg-relay.sh peer-forward update NAME --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
+  ./scripts/wg-relay.sh peer-forward update NAME [--new-name NAME] --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
   ./scripts/wg-relay.sh peer-forward assign-source SOURCE_IPV4 [NAME...]
   ./scripts/wg-relay.sh peer-forward delete NAME [--yes]
   ./scripts/wg-relay.sh peer-forward list

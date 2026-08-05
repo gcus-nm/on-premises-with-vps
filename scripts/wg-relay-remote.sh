@@ -44,7 +44,7 @@ Usage:
   wg-relay forward list
   wg-relay forward status
   wg-relay peer-forward add NAME --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
-  wg-relay peer-forward update NAME --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
+  wg-relay peer-forward update NAME [--new-name NAME] --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
   wg-relay peer-forward assign-source SOURCE_IPV4 [NAME...]
   wg-relay peer-forward delete NAME
   wg-relay peer-forward list
@@ -786,18 +786,26 @@ apply_peer_forward() {
   local mode="$1"
   local name="$2"
   shift 2
+  local new_name="${name}"
+  local new_name_provided=false
   local protocol=""
   local source_address source_addresses_text=""
   local -a source_addresses=()
   local target_address=""
   local target_port=""
-  local peer_forward_file temporary_file backup_file action_label
+  local current_file destination_file temporary_file backup_file action_label
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --protocol)
         [ "$#" -ge 2 ] || die "--protocol requires a value"
         protocol="$2"
+        shift 2
+        ;;
+      --new-name)
+        [ "$#" -ge 2 ] || die "--new-name requires a value"
+        new_name="$2"
+        new_name_provided=true
         shift 2
         ;;
       --source-address)
@@ -821,6 +829,10 @@ apply_peer_forward() {
 
   ensure_initialized
   validate_name "${name}"
+  validate_name "${new_name}"
+  if [ "${mode}" != "update" ] && ${new_name_provided}; then
+    die "--new-name can only be used with peer-forward update"
+  fi
   [ -n "${protocol}" ] || die "--protocol is required"
   [ -n "${target_address}" ] || die "--target-address is required"
   [ -n "${target_port}" ] || die "--target-port is required"
@@ -845,15 +857,19 @@ apply_peer_forward() {
   done
   check_peer_forward_available "${protocol}" "${source_addresses_text}" "${target_address}" "${target_port}" "${name}"
 
-  peer_forward_file="${PEER_FORWARD_DIR}/${name}.conf"
-  if [ "${mode}" = "add" ] && [ -e "${peer_forward_file}" ]; then
+  current_file="${PEER_FORWARD_DIR}/${name}.conf"
+  destination_file="${PEER_FORWARD_DIR}/${new_name}.conf"
+  if [ "${mode}" = "add" ] && [ -e "${destination_file}" ]; then
     die "peer-forward already exists: ${name}"
   fi
-  if [ "${mode}" = "update" ] && [ ! -e "${peer_forward_file}" ]; then
+  if [ "${mode}" = "update" ] && [ ! -e "${current_file}" ]; then
     die "peer-forward does not exist: ${name}"
   fi
+  if [ "${mode}" = "update" ] && [ "${new_name}" != "${name}" ] && [ -e "${destination_file}" ]; then
+    die "peer-forward already exists: ${new_name}"
+  fi
 
-  temporary_file="$(mktemp "${PEER_FORWARD_DIR}/.${name}.XXXXXX")"
+  temporary_file="$(mktemp "${PEER_FORWARD_DIR}/.${new_name}.XXXXXX")"
   backup_file=""
   {
     printf 'PROTOCOL=%s\n' "${protocol}"
@@ -862,19 +878,25 @@ apply_peer_forward() {
     printf 'TARGET_PORT=%s\n' "${target_port}"
   } >"${temporary_file}"
 
-  if [ -e "${peer_forward_file}" ]; then
+  if [ -e "${current_file}" ]; then
     backup_file="$(mktemp "${PEER_FORWARD_DIR}/.${name}.backup.XXXXXX")"
-    cp "${peer_forward_file}" "${backup_file}"
+    cp "${current_file}" "${backup_file}"
   fi
-  install -o root -g root -m 0600 "${temporary_file}" "${peer_forward_file}"
+  install -o root -g root -m 0600 "${temporary_file}" "${destination_file}"
   rm -f "${temporary_file}"
+  if [ "${destination_file}" != "${current_file}" ]; then
+    rm -f "${current_file}"
+  fi
 
   if ! firewall_sync; then
     log "peer-forward change failed; restoring the previous configuration"
     if [ -n "${backup_file}" ]; then
-      install -o root -g root -m 0600 "${backup_file}" "${peer_forward_file}"
+      if [ "${destination_file}" != "${current_file}" ]; then
+        rm -f "${destination_file}"
+      fi
+      install -o root -g root -m 0600 "${backup_file}" "${current_file}"
     else
-      rm -f "${peer_forward_file}"
+      rm -f "${destination_file}"
     fi
     firewall_sync || true
     rm -f "${backup_file}"
@@ -887,7 +909,11 @@ apply_peer_forward() {
   else
     action_label="updated"
   fi
-  log "${action_label} peer-forward ${name}: ${source_addresses_text:-no sources} -> ${target_address} ${protocol}/${target_port}"
+  if [ "${name}" = "${new_name}" ]; then
+    log "${action_label} peer-forward ${name}: ${source_addresses_text:-no sources} -> ${target_address} ${protocol}/${target_port}"
+  else
+    log "${action_label} peer-forward ${name} -> ${new_name}: ${source_addresses_text:-no sources} -> ${target_address} ${protocol}/${target_port}"
+  fi
 }
 
 delete_peer_forward() {

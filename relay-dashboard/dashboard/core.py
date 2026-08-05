@@ -2773,21 +2773,35 @@ class RelayManager:
     def create_peer_access_preset(self, preset: PeerAccessPreset) -> None:
         self._run(self._peer_access_preset_arguments("add", preset))
 
-    def update_peer_access_preset(self, preset: PeerAccessPreset) -> None:
-        self._run(self._peer_access_preset_arguments("update", preset))
+    def update_peer_access_preset(
+        self,
+        preset: PeerAccessPreset,
+        current_name: str | None = None,
+    ) -> None:
+        self._run(
+            self._peer_access_preset_arguments(
+                "update",
+                preset,
+                current_name=current_name,
+            )
+        )
 
     @staticmethod
     def _peer_access_preset_arguments(
         operation: str,
         preset: PeerAccessPreset,
+        current_name: str | None = None,
     ) -> list[str]:
+        command_name = current_name or preset.name
         arguments = [
             "peer-forward",
             operation,
-            preset.name,
+            command_name,
             "--protocol",
             preset.protocol,
         ]
+        if operation == "update" and command_name != preset.name:
+            arguments.extend(["--new-name", preset.name])
         for source_address in preset.source_addresses:
             arguments.extend(["--source-address", source_address])
         arguments.extend(
@@ -2849,15 +2863,27 @@ class RelayManager:
 
     def update_peer_access_preset_definition(
         self,
+        current_name: Any,
         preset: PeerAccessPreset,
     ) -> None:
-        current = self.list_peer_access_presets().get(preset.name)
+        normalized_current_name = normalize_wireguard_name(
+            current_name,
+            "アクセスプリセット名",
+            existing=True,
+        )
+        presets = self.list_peer_access_presets()
+        current = presets.get(normalized_current_name)
         if current is None:
             raise ValidationError(
-                f"アクセスプリセットが見つかりません: {preset.name}"
+                f"アクセスプリセットが見つかりません: {normalized_current_name}"
+            )
+        if preset.name != normalized_current_name and preset.name in presets:
+            raise ConflictError(
+                f"アクセスプリセット名はすでに使用されています: {preset.name}"
             )
         self.update_peer_access_preset(
-            replace(preset, source_addresses=current.source_addresses)
+            replace(preset, source_addresses=current.source_addresses),
+            current_name=normalized_current_name,
         )
 
     def delete_peer_access_rule(self, name: Any) -> str:
