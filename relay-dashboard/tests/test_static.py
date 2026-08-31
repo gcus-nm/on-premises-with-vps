@@ -122,6 +122,7 @@ class RouteDialogMarkupTests(unittest.TestCase):
             "/access-presets",
         ):
             self.assertIn(endpoint, javascript)
+        self.assertIn("peer.ipv6_cidr", javascript)
         self.assertIn("downloadClientConfig", javascript)
         self.assertIn("showPeerConfiguration", javascript)
         self.assertIn("openEditPeer", javascript)

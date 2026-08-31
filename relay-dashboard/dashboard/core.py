@@ -306,6 +306,8 @@ class WireGuardPeer:
     address: str
     cidr: str
     public_key: str
+    ipv6_address: str = ""
+    ipv6_cidr: str = ""
 
 
 @dataclass(frozen=True)
@@ -637,20 +639,40 @@ def parse_wireguard_peers(output: str) -> dict[str, WireGuardPeer]:
         if not line or line.startswith("NAME\t"):
             continue
         fields = line.split("\t")
-        if len(fields) != 3:
+        if len(fields) not in {3, 4}:
             raise DashboardError(f"WireGuard Peer一覧の{line_number}行目を解析できません。")
-        name, cidr, public_key = fields
+        if len(fields) == 3:
+            name, cidr, public_key = fields
+            ipv6_cidr = ""
+        else:
+            name, cidr, ipv6_cidr, public_key = fields
+            if ipv6_cidr == "-":
+                ipv6_cidr = ""
         try:
             interface = ipaddress.ip_interface(cidr)
         except ValueError as exc:
             raise DashboardError(f"WireGuard Peerアドレスを解析できません: {cidr}") from exc
         if interface.version != 4 or interface.network.prefixlen != 32:
             raise DashboardError(f"WireGuard Peerアドレスが/32ではありません: {cidr}")
+        ipv6_interface = None
+        if ipv6_cidr:
+            try:
+                ipv6_interface = ipaddress.ip_interface(ipv6_cidr)
+            except ValueError as exc:
+                raise DashboardError(
+                    f"WireGuard Peer IPv6アドレスを解析できません: {ipv6_cidr}"
+                ) from exc
+            if ipv6_interface.version != 6 or ipv6_interface.network.prefixlen != 128:
+                raise DashboardError(
+                    f"WireGuard Peer IPv6アドレスが/128ではありません: {ipv6_cidr}"
+                )
         peers[name] = WireGuardPeer(
             name=name,
             address=str(interface.ip),
             cidr=f"{interface.ip}/32",
             public_key=public_key,
+            ipv6_address=str(ipv6_interface.ip) if ipv6_interface else "",
+            ipv6_cidr=f"{ipv6_interface.ip}/128" if ipv6_interface else "",
         )
     return peers
 

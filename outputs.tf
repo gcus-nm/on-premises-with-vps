@@ -53,6 +53,11 @@ output "wireguard_endpoint_ipv4" {
   value       = "${oci_core_public_ip.relay.ip_address}:${var.wireguard_port}"
 }
 
+output "wireguard_endpoint_ipv6" {
+  description = "Preferred IPv6 WireGuard endpoint in bracketed host:port form."
+  value       = "[${data.oci_core_vnic.relay.ipv6addresses[0]}]:${var.wireguard_port}"
+}
+
 output "ssh_command" {
   description = "SSH command (works only when ssh_ingress_cidrs permits the caller)."
   value       = "ssh ubuntu@${oci_core_public_ip.relay.ip_address}"

@@ -20,6 +20,7 @@ readonly FORWARD_MANGLE_CHAIN="WG_RELAY_MANGLE"
 readonly FORWARD_PREROUTING_CHAIN="WG_RELAY_PREROUTING"
 readonly FORWARD_POSTROUTING_CHAIN="WG_RELAY_POSTROUTING"
 readonly DEFAULT_MTU="1380"
+readonly DEFAULT_SERVER_IPV6_ADDRESS="fdae:3e62:c345:99::1/64"
 
 log() {
   printf 'wg-relay: %s\n' "$*" >&2
@@ -33,7 +34,7 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  wg-relay init --server-address CIDR --listen-port PORT --endpoint HOST:PORT [--mtu MTU]
+  wg-relay init --server-address CIDR [--server-address-ipv6 IPV6/64] --listen-port PORT --endpoint HOST:PORT [--mtu MTU]
   wg-relay add NAME --address IPV4/32
   wg-relay update NAME --address IPV4/32
   wg-relay rename CURRENT_NAME NEW_NAME
@@ -41,6 +42,10 @@ Usage:
   wg-relay list
   wg-relay status
   wg-relay public-key
+  wg-relay endpoint show
+  wg-relay endpoint set --endpoint HOST:PORT
+  wg-relay ipv6 show
+  wg-relay ipv6 enable --server-address IPV6/64
   wg-relay forward add NAME --protocol tcp|udp --listen-port PORT --target-address IPV4 --target-port PORT
   wg-relay forward update NAME --protocol tcp|udp --listen-port PORT --target-address IPV4 --target-port PORT
   wg-relay forward delete NAME
@@ -64,7 +69,7 @@ require_root() {
 
 require_commands() {
   local command_name
-  for command_name in flock ip iptables mktemp python3 systemctl wg wg-quick; do
+  for command_name in flock ip ip6tables iptables mktemp python3 systemctl wg wg-quick; do
     command -v "${command_name}" >/dev/null 2>&1 || die "required command not found: ${command_name}"
   done
 }
@@ -87,6 +92,23 @@ except ValueError as exc:
 
 if address.version != 4 or address.network.prefixlen > 30:
     raise SystemExit("server address must be an IPv4 interface with a prefix length from 0 through 30")
+PY
+}
+
+validate_server_ipv6_address() {
+  python3 - "$1" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.ip_interface(sys.argv[1])
+except ValueError as exc:
+    raise SystemExit(str(exc))
+
+if address.version != 6 or address.network.prefixlen != 64:
+    raise SystemExit("server IPv6 address must be an IPv6 /64 interface")
+if address.ip not in ipaddress.ip_network("fc00::/7"):
+    raise SystemExit("server IPv6 address must use a private ULA prefix")
 PY
 }
 
@@ -183,6 +205,45 @@ read_setting() {
   awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${SETTINGS_FILE}"
 }
 
+server_ipv6_address() {
+  read_setting SERVER_ADDRESS_IPV6
+}
+
+peer_ipv4_cidr() {
+  local peer_file="$1"
+  awk -F'= ' '/^AllowedIPs = / {
+    split($2, addresses, ",")
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", addresses[1])
+    print addresses[1]
+    exit
+  }' "${peer_file}"
+}
+
+client_ipv6_cidr() {
+  local client_address_ipv4="$1"
+  local relay_address_ipv6
+  relay_address_ipv6="$(server_ipv6_address)"
+  [ -n "${relay_address_ipv6}" ] || return 0
+
+  python3 - "${relay_address_ipv6}" "${client_address_ipv4}" <<'PY'
+import ipaddress
+import sys
+
+network = ipaddress.ip_interface(sys.argv[1]).network
+client = ipaddress.ip_interface(sys.argv[2])
+host_label = str(client.ip).rsplit(".", 1)[1]
+host_value = int(host_label, 16)
+address = ipaddress.IPv6Address(int(network.network_address) + host_value)
+print(f"{address}/128")
+PY
+}
+
+client_ipv6_address() {
+  local cidr
+  cidr="$(client_ipv6_cidr "$1")"
+  printf '%s\n' "${cidr%/*}"
+}
+
 wireguard_mtu() {
   local mtu
   mtu="$(read_setting MTU)"
@@ -193,6 +254,53 @@ ensure_initialized() {
   [ -f "${SETTINGS_FILE}" ] || die "relay is not initialized; run init first"
   [ -s "${PRIVATE_KEY_FILE}" ] || die "server private key is missing"
   [ -s "${PUBLIC_KEY_FILE}" ] || die "server public key is missing"
+}
+
+set_setting() {
+  local key="$1"
+  local value="$2"
+  local temporary_settings
+
+  temporary_settings="$(mktemp "${STATE_DIR}/.settings.XXXXXX")"
+  WG_RELAY_SETTING_KEY="${key}" WG_RELAY_SETTING_VALUE="${value}" awk '
+    BEGIN { updated = 0 }
+    $0 ~ ("^" ENVIRON["WG_RELAY_SETTING_KEY"] "=") {
+      print ENVIRON["WG_RELAY_SETTING_KEY"] "=" ENVIRON["WG_RELAY_SETTING_VALUE"]
+      updated = 1
+      next
+    }
+    { print }
+    END {
+      if (!updated) {
+        print ENVIRON["WG_RELAY_SETTING_KEY"] "=" ENVIRON["WG_RELAY_SETTING_VALUE"]
+      }
+    }
+  ' "${SETTINGS_FILE}" >"${temporary_settings}"
+  install -o root -g root -m 0600 "${temporary_settings}" "${SETTINGS_FILE}"
+  rm -f "${temporary_settings}"
+}
+
+endpoint_command() {
+  local operation="${1:-}"
+  shift || true
+  local endpoint=""
+
+  ensure_initialized
+  case "${operation}" in
+    show)
+      [ "$#" -eq 0 ] || die "endpoint show does not accept arguments"
+      read_setting PUBLIC_ENDPOINT
+      ;;
+    set)
+      [ "$#" -eq 2 ] && [ "$1" = "--endpoint" ] ||
+        die "usage: wg-relay endpoint set --endpoint HOST:PORT"
+      endpoint="$2"
+      validate_endpoint "${endpoint}"
+      set_setting PUBLIC_ENDPOINT "${endpoint}"
+      log "updated public endpoint to ${endpoint}; active peers were not restarted"
+      ;;
+    *) die "usage: wg-relay endpoint show|set --endpoint HOST:PORT" ;;
+  esac
 }
 
 ensure_server_keys() {
@@ -212,9 +320,28 @@ ensure_server_keys() {
   chmod 0644 "${PUBLIC_KEY_FILE}"
 }
 
+render_peer_config() {
+  local peer_file="$1"
+  local name public_key address_ipv4 address_ipv6
+  name="$(basename "${peer_file}" .conf)"
+  public_key="$(awk -F'= ' '/^PublicKey = / { print $2; exit }' "${peer_file}")"
+  address_ipv4="$(peer_ipv4_cidr "${peer_file}")"
+  address_ipv6="$(client_ipv6_cidr "${address_ipv4}")"
+
+  printf '# Managed peer: %s\n' "${name}"
+  printf '[Peer]\n'
+  printf 'PublicKey = %s\n' "${public_key}"
+  if [ -n "${address_ipv6}" ]; then
+    printf 'AllowedIPs = %s, %s\n' "${address_ipv4}" "${address_ipv6}"
+  else
+    printf 'AllowedIPs = %s\n' "${address_ipv4}"
+  fi
+}
+
 render_config() {
-  local server_address listen_port mtu private_key peer_file temporary_file
+  local server_address server_address_ipv6 listen_port mtu private_key peer_file temporary_file
   server_address="$(read_setting SERVER_ADDRESS)"
+  server_address_ipv6="$(server_ipv6_address)"
   listen_port="$(read_setting LISTEN_PORT)"
   mtu="$(wireguard_mtu)"
   private_key="$(tr -d '\r\n' <"${PRIVATE_KEY_FILE}")"
@@ -223,7 +350,11 @@ render_config() {
   {
     printf '%s\n' "${MANAGED_MARKER}"
     printf '[Interface]\n'
-    printf 'Address = %s\n' "${server_address}"
+    if [ -n "${server_address_ipv6}" ]; then
+      printf 'Address = %s, %s\n' "${server_address}" "${server_address_ipv6}"
+    else
+      printf 'Address = %s\n' "${server_address}"
+    fi
     printf 'ListenPort = %s\n' "${listen_port}"
     printf 'MTU = %s\n' "${mtu}"
     printf 'PrivateKey = %s\n' "${private_key}"
@@ -233,7 +364,7 @@ render_config() {
     for peer_file in "${PEER_DIR}"/*.conf; do
       [ -f "${peer_file}" ] || continue
       printf '\n'
-      cat "${peer_file}"
+      render_peer_config "${peer_file}"
     done
   } >"${temporary_file}"
 
@@ -248,11 +379,16 @@ render_config() {
 }
 
 ensure_firewall_rule() {
-  local listen_port
+  local listen_port server_address_ipv6
   listen_port="$(read_setting LISTEN_PORT)"
+  server_address_ipv6="$(server_ipv6_address)"
 
   if ! iptables -C INPUT -p udp --dport "${listen_port}" -m comment --comment "${FIREWALL_COMMENT}" -j ACCEPT 2>/dev/null; then
     iptables -I INPUT 1 -p udp --dport "${listen_port}" -m comment --comment "${FIREWALL_COMMENT}" -j ACCEPT
+  fi
+  if [ -n "${server_address_ipv6}" ] &&
+    ! ip6tables -C INPUT -p udp --dport "${listen_port}" -m comment --comment "${FIREWALL_COMMENT}" -j ACCEPT 2>/dev/null; then
+    ip6tables -I INPUT 1 -p udp --dport "${listen_port}" -m comment --comment "${FIREWALL_COMMENT}" -j ACCEPT
   fi
 }
 
@@ -312,6 +448,85 @@ remove_chain() {
     iptables -w -t "${table}" -F "${chain}"
     iptables -w -t "${table}" -X "${chain}"
   fi
+}
+
+ensure_ipv6_chain() {
+  ip6tables -w -t filter -N "${FORWARD_FILTER_CHAIN}" 2>/dev/null || true
+  ip6tables -w -t filter -F "${FORWARD_FILTER_CHAIN}"
+}
+
+ensure_ipv6_jump() {
+  local direction="$1"
+  if ! ip6tables -w -t filter -C FORWARD "-${direction}" wg0 -j "${FORWARD_FILTER_CHAIN}" 2>/dev/null; then
+    ip6tables -w -t filter -I FORWARD 1 "-${direction}" wg0 -j "${FORWARD_FILTER_CHAIN}"
+  fi
+}
+
+remove_ipv6_jump() {
+  local direction="$1"
+  while ip6tables -w -t filter -C FORWARD "-${direction}" wg0 -j "${FORWARD_FILTER_CHAIN}" 2>/dev/null; do
+    ip6tables -w -t filter -D FORWARD "-${direction}" wg0 -j "${FORWARD_FILTER_CHAIN}"
+  done
+}
+
+firewall_clear_ipv6() {
+  local listen_port=""
+  if [ -f "${SETTINGS_FILE}" ]; then
+    listen_port="$(read_setting LISTEN_PORT)"
+  fi
+  if [ -n "${listen_port}" ]; then
+    while ip6tables -w -C INPUT -p udp --dport "${listen_port}" -m comment --comment "${FIREWALL_COMMENT}" -j ACCEPT 2>/dev/null; do
+      ip6tables -w -D INPUT -p udp --dport "${listen_port}" -m comment --comment "${FIREWALL_COMMENT}" -j ACCEPT
+    done
+  fi
+  remove_ipv6_jump i
+  remove_ipv6_jump o
+  if ip6tables -w -t filter -S "${FORWARD_FILTER_CHAIN}" >/dev/null 2>&1; then
+    ip6tables -w -t filter -F "${FORWARD_FILTER_CHAIN}"
+    ip6tables -w -t filter -X "${FORWARD_FILTER_CHAIN}"
+  fi
+}
+
+firewall_sync_ipv6() {
+  local server_address_ipv6 peer_forward_file peer_forward_name protocol
+  local source_address source_address_ipv6 source_addresses target_address target_address_ipv6 target_port
+  local -a peer_sources
+
+  server_address_ipv6="$(server_ipv6_address)"
+  if [ -z "${server_address_ipv6}" ]; then
+    firewall_clear_ipv6
+    return
+  fi
+
+  ensure_ipv6_chain
+  ensure_ipv6_jump i
+  ensure_ipv6_jump o
+
+  for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
+    [ -f "${peer_forward_file}" ] || continue
+    peer_forward_name="$(basename "${peer_forward_file}" .conf)"
+    protocol="$(read_forward_setting PROTOCOL "${peer_forward_file}")"
+    source_addresses="$(read_peer_forward_sources "${peer_forward_file}")"
+    target_address="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
+    target_address_ipv6="$(client_ipv6_address "${target_address}/32")"
+    target_port="$(read_forward_setting TARGET_PORT "${peer_forward_file}")"
+
+    IFS=',' read -r -a peer_sources <<<"${source_addresses}"
+    for source_address in "${peer_sources[@]}"; do
+      [ -n "${source_address}" ] || continue
+      source_address_ipv6="$(client_ipv6_address "${source_address}/32")"
+      ip6tables -w -t filter -A "${FORWARD_FILTER_CHAIN}" \
+        -i wg0 -o wg0 -p "${protocol}" -s "${source_address_ipv6}" -d "${target_address_ipv6}" --dport "${target_port}" \
+        -m conntrack --ctstate NEW,ESTABLISHED \
+        -m comment --comment "peer-forward:${peer_forward_name}:${source_address_ipv6}" -j ACCEPT
+      ip6tables -w -t filter -A "${FORWARD_FILTER_CHAIN}" \
+        -i wg0 -o wg0 -p "${protocol}" -s "${target_address_ipv6}" -d "${source_address_ipv6}" \
+        -m conntrack --ctstate RELATED,ESTABLISHED \
+        -m comment --comment "peer-forward:${peer_forward_name}:${source_address_ipv6}:return" -j ACCEPT
+    done
+  done
+
+  ip6tables -w -t filter -A "${FORWARD_FILTER_CHAIN}" -j REJECT --reject-with icmp6-adm-prohibited
 }
 
 firewall_sync() {
@@ -385,6 +600,7 @@ firewall_sync() {
   iptables -w -t mangle -A "${FORWARD_MANGLE_CHAIN}" -j RETURN
   iptables -w -t nat -A "${FORWARD_PREROUTING_CHAIN}" -j RETURN
   iptables -w -t nat -A "${FORWARD_POSTROUTING_CHAIN}" -j RETURN
+  firewall_sync_ipv6
 }
 
 firewall_clear() {
@@ -399,6 +615,8 @@ firewall_clear() {
     done
   fi
 
+  firewall_clear_ipv6
+
   remove_jump filter FORWARD "${FORWARD_FILTER_CHAIN}"
   remove_jump mangle FORWARD "${FORWARD_MANGLE_CHAIN}"
   remove_jump nat PREROUTING "${FORWARD_PREROUTING_CHAIN}"
@@ -412,6 +630,9 @@ firewall_clear() {
 sync_interface() {
   if systemctl is-active --quiet wg-quick@wg0; then
     wg syncconf wg0 <(wg-quick strip "${WG_CONFIG}")
+    if [ -n "$(server_ipv6_address)" ]; then
+      ip -6 address replace "$(server_ipv6_address)" dev wg0
+    fi
   else
     systemctl enable --now wg-quick@wg0 >&2
   fi
@@ -427,34 +648,53 @@ check_address_available() {
     [ -f "${peer_file}" ] || continue
     existing_name="$(basename "${peer_file}" .conf)"
     [ "${existing_name}" = "${excluded_name}" ] && continue
-    existing_address="$(awk -F'= ' '/^AllowedIPs = / { print $2; exit }' "${peer_file}")"
+    existing_address="$(peer_ipv4_cidr "${peer_file}")"
     [ "${existing_address}" != "${address}" ] || die "address is already assigned to peer ${existing_name}"
   done
 }
 
 client_allowed_ips() {
-  local server_address
+  local server_address server_address_ipv6 network_ipv4 network_ipv6
   server_address="$(read_setting SERVER_ADDRESS)"
-  python3 - "${server_address}" <<'PY'
+  server_address_ipv6="$(server_ipv6_address)"
+  network_ipv4="$(python3 - "${server_address}" <<'PY'
 import ipaddress
 import sys
 
 print(ipaddress.ip_interface(sys.argv[1]).network)
 PY
+)"
+  if [ -z "${server_address_ipv6}" ]; then
+    printf '%s\n' "${network_ipv4}"
+    return
+  fi
+  network_ipv6="$(python3 - "${server_address_ipv6}" <<'PY'
+import ipaddress
+import sys
+
+print(ipaddress.ip_interface(sys.argv[1]).network)
+PY
+)"
+  printf '%s, %s\n' "${network_ipv4}" "${network_ipv6}"
 }
 
 write_client_config() {
   local client_private_key="$1"
   local client_address="$2"
-  local endpoint mtu server_public_key
+  local endpoint mtu server_public_key client_address_ipv6 interface_addresses
   endpoint="$(read_setting PUBLIC_ENDPOINT)"
   mtu="$(wireguard_mtu)"
   server_public_key="$(tr -d '\r\n' <"${PUBLIC_KEY_FILE}")"
+  client_address_ipv6="$(client_ipv6_cidr "${client_address}")"
+  interface_addresses="${client_address}"
+  if [ -n "${client_address_ipv6}" ]; then
+    interface_addresses="${interface_addresses}, ${client_address_ipv6}"
+  fi
 
   cat <<EOF
 [Interface]
 PrivateKey = ${client_private_key}
-Address = ${client_address}
+Address = ${interface_addresses}
 MTU = ${mtu}
 
 [Peer]
@@ -485,7 +725,7 @@ apply_peer() {
     die "peer does not exist: ${name}"
   fi
   if [ "${mode}" = "update" ]; then
-    existing_peer_address="$(awk -F'= ' '/^AllowedIPs = / { print $2; exit }' "${peer_file}")"
+    existing_peer_address="$(peer_ipv4_cidr "${peer_file}")"
     if [ "${existing_peer_address}" != "${address}" ]; then
       ensure_peer_address_not_referenced "${existing_peer_address}"
     fi
@@ -585,7 +825,7 @@ delete_peer() {
   validate_name "${name}"
   peer_file="${PEER_DIR}/${name}.conf"
   [ -e "${peer_file}" ] || die "peer does not exist: ${name}"
-  peer_address="$(awk -F'= ' '/^AllowedIPs = / { print $2; exit }' "${peer_file}")"
+  peer_address="$(peer_ipv4_cidr "${peer_file}")"
   ensure_peer_address_not_referenced "${peer_address}"
 
   backup_peer="$(mktemp "${PEER_DIR}/.${name}.backup.XXXXXX")"
@@ -766,6 +1006,8 @@ forward_status() {
   iptables -w -t nat -S "${FORWARD_PREROUTING_CHAIN}" 2>/dev/null || printf '(not applied)\n'
   printf '\nSNAT rules:\n'
   iptables -w -t nat -S "${FORWARD_POSTROUTING_CHAIN}" 2>/dev/null || printf '(not applied)\n'
+  printf '\nIPv6 peer filter rules:\n'
+  ip6tables -w -t filter -S "${FORWARD_FILTER_CHAIN}" 2>/dev/null || printf '(not applied)\n'
 }
 
 forward_command() {
@@ -799,7 +1041,7 @@ ensure_registered_peer_address() {
 
   for peer_file in "${PEER_DIR}"/*.conf; do
     [ -f "${peer_file}" ] || continue
-    peer_address="$(awk -F'= ' '/^AllowedIPs = / { print $2; exit }' "${peer_file}")"
+    peer_address="$(peer_ipv4_cidr "${peer_file}")"
     if [ "${peer_address}" = "${address}/32" ]; then
       return 0
     fi
@@ -1150,6 +1392,9 @@ peer_forward_status() {
   printf '\nFilter rules:\n'
   iptables -w -t filter -S "${FORWARD_FILTER_CHAIN}" 2>/dev/null |
     grep -F 'peer-forward:' || printf '(not applied)\n'
+  printf '\nIPv6 filter rules:\n'
+  ip6tables -w -t filter -S "${FORWARD_FILTER_CHAIN}" 2>/dev/null |
+    grep -F 'peer-forward:' || printf '(not applied)\n'
 }
 
 peer_forward_command() {
@@ -1181,8 +1426,51 @@ peer_forward_command() {
   esac
 }
 
+ipv6_command() {
+  local operation="${1:-}"
+  shift || true
+  local server_address="" current_server_address
+  local backup_settings
+
+  ensure_initialized
+  case "${operation}" in
+    show)
+      [ "$#" -eq 0 ] || die "ipv6 show does not accept arguments"
+      server_address="$(server_ipv6_address)"
+      printf '%s\n' "${server_address:-disabled}"
+      ;;
+    enable)
+      [ "$#" -eq 2 ] && [ "$1" = "--server-address" ] ||
+        die "usage: wg-relay ipv6 enable --server-address IPV6/64"
+      server_address="$2"
+      validate_server_ipv6_address "${server_address}"
+      current_server_address="$(server_ipv6_address)"
+      if [ -n "${current_server_address}" ] &&
+        [ "${current_server_address}" != "${server_address}" ]; then
+        die "WireGuard IPv6 is already enabled at ${current_server_address}; changing the ULA requires an explicit migration"
+      fi
+      backup_settings="$(mktemp "${STATE_DIR}/.settings.backup.XXXXXX")"
+      cp "${SETTINGS_FILE}" "${backup_settings}"
+      set_setting SERVER_ADDRESS_IPV6 "${server_address}"
+      if ! render_config || ! sync_interface; then
+        log "IPv6 enable failed; restoring the previous configuration"
+        install -o root -g root -m 0600 "${backup_settings}" "${SETTINGS_FILE}"
+        ip -6 address del "${server_address}" dev wg0 2>/dev/null || true
+        render_config
+        sync_interface || true
+        rm -f "${backup_settings}"
+        die "could not enable WireGuard IPv6"
+      fi
+      rm -f "${backup_settings}"
+      log "enabled WireGuard IPv6 at ${server_address}; active peer keys and IPv4 addresses were preserved"
+      ;;
+    *) die "usage: wg-relay ipv6 show|enable --server-address IPV6/64" ;;
+  esac
+}
+
 init_relay() {
   local server_address=""
+  local server_address_ipv6="${DEFAULT_SERVER_IPV6_ADDRESS}"
   local listen_port=""
   local endpoint=""
   local mtu="${DEFAULT_MTU}"
@@ -1193,6 +1481,11 @@ init_relay() {
       --server-address)
         [ "$#" -ge 2 ] || die "--server-address requires a value"
         server_address="$2"
+        shift 2
+        ;;
+      --server-address-ipv6)
+        [ "$#" -ge 2 ] || die "--server-address-ipv6 requires a value"
+        server_address_ipv6="$2"
         shift 2
         ;;
       --listen-port)
@@ -1218,6 +1511,7 @@ init_relay() {
   [ -n "${listen_port}" ] || die "--listen-port is required"
   [ -n "${endpoint}" ] || die "--endpoint is required"
   validate_server_address "${server_address}"
+  validate_server_ipv6_address "${server_address_ipv6}"
   validate_port "${listen_port}"
   validate_endpoint "${endpoint}"
   validate_mtu "${mtu}"
@@ -1231,6 +1525,7 @@ init_relay() {
   temporary_settings="$(mktemp "${STATE_DIR}/.settings.XXXXXX")"
   {
     printf 'SERVER_ADDRESS=%s\n' "${server_address}"
+    printf 'SERVER_ADDRESS_IPV6=%s\n' "${server_address_ipv6}"
     printf 'LISTEN_PORT=%s\n' "${listen_port}"
     printf 'PUBLIC_ENDPOINT=%s\n' "${endpoint}"
     printf 'MTU=%s\n' "${mtu}"
@@ -1242,20 +1537,22 @@ init_relay() {
   systemctl enable wg-quick@wg0 >&2
   systemctl restart wg-quick@wg0
   firewall_sync
-  log "initialized relay at ${server_address}, endpoint ${endpoint}, MTU ${mtu}"
+  log "initialized relay at ${server_address} and ${server_address_ipv6}, endpoint ${endpoint}, MTU ${mtu}"
   printf '%s\n' "$(tr -d '\r\n' <"${PUBLIC_KEY_FILE}")"
 }
 
 list_peers() {
-  local peer_file name address public_key
+  local peer_file name address address_ipv6 public_key
   ensure_initialized
-  printf 'NAME\tADDRESS\tPUBLIC_KEY\n'
+  printf 'NAME\tIPV4_ADDRESS\tIPV6_ADDRESS\tPUBLIC_KEY\n'
   for peer_file in "${PEER_DIR}"/*.conf; do
     [ -f "${peer_file}" ] || continue
     name="$(basename "${peer_file}" .conf)"
-    address="$(awk -F'= ' '/^AllowedIPs = / { print $2; exit }' "${peer_file}")"
+    address="$(peer_ipv4_cidr "${peer_file}")"
+    address_ipv6="$(client_ipv6_cidr "${address}")"
+    address_ipv6="${address_ipv6:--}"
     public_key="$(awk -F'= ' '/^PublicKey = / { print $2; exit }' "${peer_file}")"
-    printf '%s\t%s\t%s\n' "${name}" "${address}" "${public_key}"
+    printf '%s\t%s\t%s\t%s\n' "${name}" "${address}" "${address_ipv6}" "${public_key}"
   done
 }
 
@@ -1323,6 +1620,12 @@ main() {
       [ "$#" -eq 0 ] || die "usage: wg-relay public-key"
       ensure_initialized
       cat "${PUBLIC_KEY_FILE}"
+      ;;
+    endpoint)
+      endpoint_command "$@"
+      ;;
+    ipv6)
+      ipv6_command "$@"
       ;;
     forward)
       forward_command "$@"

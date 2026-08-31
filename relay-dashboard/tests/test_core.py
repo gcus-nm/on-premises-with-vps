@@ -910,9 +910,9 @@ class WireGuardManagementTests(unittest.TestCase):
 
     def test_parses_peers_status_and_access_rules(self) -> None:
         peers = parse_wireguard_peers(
-            "NAME\tADDRESS\tPUBLIC_KEY\n"
-            "windows-minibox\t10.99.0.2/32\twindows-key\n"
-            "mac-admin\t10.99.0.3/32\tmac-key\n"
+            "NAME\tIPV4_ADDRESS\tIPV6_ADDRESS\tPUBLIC_KEY\n"
+            "windows-minibox\t10.99.0.2/32\tfdae:3e62:c345:99::2/128\twindows-key\n"
+            "mac-admin\t10.99.0.3/32\tfdae:3e62:c345:99::3/128\tmac-key\n"
         )
         statuses = parse_wireguard_status(
             "interface: wg0\n"
@@ -927,12 +927,24 @@ class WireGuardManagementTests(unittest.TestCase):
         )
 
         self.assertEqual(peers["windows-minibox"].address, "10.99.0.2")
+        self.assertEqual(
+            peers["windows-minibox"].ipv6_address,
+            "fdae:3e62:c345:99::2",
+        )
         self.assertEqual(statuses["mac-key"]["latest_handshake"], "42 seconds ago")
         self.assertEqual(presets["dashboard"].target_port, 8081)
         self.assertEqual(
             presets["dashboard"].source_addresses,
             ("10.99.0.3", "10.99.0.5"),
         )
+
+    def test_parses_legacy_ipv4_only_peer_list(self) -> None:
+        peers = parse_wireguard_peers(
+            "NAME\tADDRESS\tPUBLIC_KEY\n"
+            "legacy\t10.99.0.4/32\tlegacy-key\n"
+        )
+        self.assertEqual(peers["legacy"].address, "10.99.0.4")
+        self.assertEqual(peers["legacy"].ipv6_address, "")
 
     def test_validates_and_suggests_peer_addresses(self) -> None:
         peers = [
