@@ -9,6 +9,7 @@ readonly REMOTE_SCRIPT="${SCRIPT_DIR}/wg-relay-remote.sh"
 readonly REMOTE_PATH="/usr/local/sbin/wg-relay"
 readonly SSH_HOST="${WG_RELAY_SSH_HOST:-oci-relay}"
 readonly GENERATED_DIR="${PROJECT_DIR}/generated/wireguard"
+readonly DEFAULT_SERVER_IPV6_ADDRESS="fdae:3e62:c345:99::1/64"
 SSH_CONFIG="${WG_RELAY_SSH_CONFIG:-}"
 if [ -z "${SSH_CONFIG}" ] && [ -n "${HOME:-}" ] && [ -f "${HOME}/.ssh/config" ]; then
   SSH_CONFIG="${HOME}/.ssh/config"
@@ -28,7 +29,7 @@ usage() {
   cat <<'EOF'
 Usage:
   ./scripts/wg-relay.sh install
-  ./scripts/wg-relay.sh init [--server-address CIDR] [--listen-port PORT] [--endpoint HOST:PORT] [--mtu MTU]
+  ./scripts/wg-relay.sh init [--server-address CIDR] [--server-address-ipv6 IPV6/64] [--listen-port PORT] [--endpoint HOST:PORT] [--mtu MTU]
   ./scripts/wg-relay.sh add NAME --address IPV4/32 [--output FILE|-]
   ./scripts/wg-relay.sh update NAME --address IPV4/32 [--output FILE|-]
   ./scripts/wg-relay.sh rename CURRENT_NAME NEW_NAME
@@ -36,6 +37,10 @@ Usage:
   ./scripts/wg-relay.sh list
   ./scripts/wg-relay.sh status
   ./scripts/wg-relay.sh public-key
+  ./scripts/wg-relay.sh endpoint show
+  ./scripts/wg-relay.sh endpoint set [--endpoint HOST:PORT]
+  ./scripts/wg-relay.sh ipv6 show
+  ./scripts/wg-relay.sh ipv6 enable [--server-address IPV6/64]
   ./scripts/wg-relay.sh forward add NAME --protocol tcp|udp --listen-port PORT --target-address IPV4 --target-port PORT
   ./scripts/wg-relay.sh forward update NAME --protocol tcp|udp --listen-port PORT --target-address IPV4 --target-port PORT
   ./scripts/wg-relay.sh forward delete NAME [--yes]
@@ -103,13 +108,22 @@ install_remote() {
 
 terraform_endpoint() {
   local endpoint
+
+  if endpoint="$(cd "${PROJECT_DIR}" && terraform output -raw wireguard_endpoint_ipv6 2>/dev/null)" &&
+    [ -n "${endpoint}" ]; then
+    printf '%s\n' "${endpoint}"
+    return
+  fi
+
+  log "IPv6 WireGuard endpoint is unavailable; falling back to IPv4"
   endpoint="$(cd "${PROJECT_DIR}" && terraform output -raw wireguard_endpoint_ipv4 2>/dev/null)" ||
-    die "could not read wireguard_endpoint_ipv4; pass --endpoint explicitly"
+    die "could not read a WireGuard endpoint; pass --endpoint explicitly"
   printf '%s\n' "${endpoint}"
 }
 
 init_remote() {
   local server_address="10.99.0.1/24"
+  local server_address_ipv6="${DEFAULT_SERVER_IPV6_ADDRESS}"
   local listen_port="51820"
   local endpoint=""
   local mtu="1380"
@@ -124,6 +138,11 @@ init_remote() {
       --listen-port)
         [ "$#" -ge 2 ] || die "--listen-port requires a value"
         listen_port="$2"
+        shift 2
+        ;;
+      --server-address-ipv6)
+        [ "$#" -ge 2 ] || die "--server-address-ipv6 requires a value"
+        server_address_ipv6="$2"
         shift 2
         ;;
       --endpoint)
@@ -145,9 +164,67 @@ init_remote() {
   fi
   remote_command init \
     --server-address "${server_address}" \
+    --server-address-ipv6 "${server_address_ipv6}" \
     --listen-port "${listen_port}" \
     --endpoint "${endpoint}" \
     --mtu "${mtu}"
+}
+
+ipv6_remote() {
+  local operation="${1:-}"
+  shift || true
+  local server_address="${DEFAULT_SERVER_IPV6_ADDRESS}"
+
+  case "${operation}" in
+    show)
+      [ "$#" -eq 0 ] || die "ipv6 show does not accept arguments"
+      remote_command ipv6 show
+      ;;
+    enable)
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --server-address)
+            [ "$#" -ge 2 ] || die "--server-address requires a value"
+            server_address="$2"
+            shift 2
+            ;;
+          *) die "unknown ipv6 enable option: $1" ;;
+        esac
+      done
+      remote_command ipv6 enable --server-address "${server_address}"
+      ;;
+    *) die "usage: ./scripts/wg-relay.sh ipv6 show|enable [--server-address IPV6/64]" ;;
+  esac
+}
+
+endpoint_remote() {
+  local operation="${1:-}"
+  shift || true
+  local endpoint=""
+
+  case "${operation}" in
+    show)
+      [ "$#" -eq 0 ] || die "endpoint show does not accept arguments"
+      remote_command endpoint show
+      ;;
+    set)
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --endpoint)
+            [ "$#" -ge 2 ] || die "--endpoint requires a value"
+            endpoint="$2"
+            shift 2
+            ;;
+          *) die "unknown endpoint set option: $1" ;;
+        esac
+      done
+      if [ -z "${endpoint}" ]; then
+        endpoint="$(terraform_endpoint)"
+      fi
+      remote_command endpoint set --endpoint "${endpoint}"
+      ;;
+    *) die "usage: ./scripts/wg-relay.sh endpoint show|set [--endpoint HOST:PORT]" ;;
+  esac
 }
 
 generate_client_config() {
@@ -330,6 +407,12 @@ main() {
     list | status | public-key)
       [ "$#" -eq 0 ] || die "${command_name} does not accept arguments"
       remote_command "${command_name}"
+      ;;
+    endpoint)
+      endpoint_remote "$@"
+      ;;
+    ipv6)
+      ipv6_remote "$@"
       ;;
     forward)
       forward_remote "$@"

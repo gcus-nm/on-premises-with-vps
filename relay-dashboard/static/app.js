@@ -316,6 +316,7 @@ function renderPeerItem(peer, locked) {
         <div>
           <strong>${escapeHtml(peer.name)}</strong>
           <small class="mono">${escapeHtml(peer.cidr)}</small>
+          ${peer.ipv6_cidr ? `<small class="mono">${escapeHtml(peer.ipv6_cidr)}</small>` : ""}
         </div>
         <small>
           <span class="status-dot ${connected ? "connected" : ""}"></span>

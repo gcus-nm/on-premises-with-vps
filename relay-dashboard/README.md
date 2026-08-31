@@ -52,6 +52,7 @@ OCIの公開ポートからWindows MiniPCへの転送経路を、ブラウザか
 - GUI管理経路の追加・更新・有効化・無効化・削除
 - TCP/UDPを混在できるポートグループと最大64ポートの一括追加
 - WireGuard Peerの追加、状態確認、鍵ローテーション、削除
+- WireGuard PeerのIPv4・ULA IPv6アドレス表示とデュアルスタック設定の発行
 - WireGuard Peer追加・鍵ローテーション時のQRコードと構成ファイル発行
 - Peer間アクセスルールの追加、更新、削除
 - Terraform planとapply

@@ -243,11 +243,19 @@ A1を選択した場合は既定で1 OCPU・メモリ6 GiBです。東京リー�
 ```sh
 terraform output public_ipv4
 terraform output public_ipv6_addresses
+terraform output wireguard_endpoint_ipv6
 terraform output wireguard_endpoint_ipv4
 terraform output ssh_command
 ```
 
-WireGuardのIPv4エンドポイントは次の形式で出力されます。
+WireGuardのIPv6エンドポイントは次の形式で出力されます。IPv6リテラルをEndpointとして
+利用できるよう、アドレスを角括弧で囲みます。
+
+```text
+[2001:db8::20]:51820
+```
+
+IPv4エンドポイントは退避経路として次の形式で出力されます。
 
 ```text
 203.0.113.20:51820
@@ -331,7 +339,7 @@ OCI環境の作成後は、次の順番で実装します。
 1. OCI VMとオンプレミスサーバーで、それぞれWireGuard鍵を生成する
 2. OCI VMを固定のWireGuard待受側にする
 3. オンプレミスサーバーからOCIへ常時接続する
-4. WireGuard内で利用するプライベートアドレスを割り当てる
+4. WireGuard内で利用するIPv4とULA IPv6アドレスを割り当てる
 5. OCIの公開ポートを、WireGuard経由でオンプレミスへDNATする
 6. 戻り通信の経路とSNATを設定する
 7. IPv4、IPv6、TCP、UDPをそれぞれ疎通確認する

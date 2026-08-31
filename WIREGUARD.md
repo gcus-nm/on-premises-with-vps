@@ -79,21 +79,82 @@ WG_RELAY_SSH_HOST=別名 ./scripts/wg-relay.sh status
 既定値は次のとおりです。
 
 - OCIトンネルアドレス: `10.99.0.1/24`
+- OCIトンネルIPv6アドレス: `fdae:3e62:c345:99::1/64`
 - WireGuard待受ポート: `51820/udp`
-- 公開Endpoint: `terraform output wireguard_endpoint_ipv4`の値
+- 公開Endpoint: `terraform output wireguard_endpoint_ipv6`の値
 - WireGuard MTU: `1380`
+
+IPv6 Endpointを取得できない場合だけ、管理スクリプトは
+`terraform output wireguard_endpoint_ipv4`へ退避します。IPv6を利用できないクライアントでは、
+その端末のWireGuard設定の`Endpoint`をIPv4出力へ変更してください。トンネル内の
+`10.99.0.0/24`と既存のPeer鍵はどちらのEndpointでも共通です。
 
 明示する場合:
 
 ```bash
-./scripts/wg-relay.sh init \
-  --server-address 10.99.0.1/24 \
-  --listen-port 51820 \
-  --endpoint 161.33.162.42:51820 \
-  --mtu 1380
+./scripts/wg-relay.sh init --server-address 10.99.0.1/24 --server-address-ipv6 fdae:3e62:c345:99::1/64 --listen-port 51820 --endpoint '[2001:db8::20]:51820' --mtu 1380
+```
+
+このEndpointは新しく発行するPeer設定へ記録されます。すでに各端末へインポート済みの設定は
+自動更新されないため、段階移行では最初の1台だけ`Endpoint`をIPv6出力へ変更し、
+`latest handshake`を確認してから他の端末へ展開します。
+
+初期化済みのOCIで、稼働中Peerを再起動せずに今後発行する設定のEndpointだけを切り替える場合:
+
+```bash
+./scripts/wg-relay.sh endpoint set
+```
+
+現在記録されているEndpointを確認する場合:
+
+```bash
+./scripts/wg-relay.sh endpoint show
 ```
 
 すでにOCI上に`private.key`と`public.key`がある場合は再利用します。既存の`wg0.conf`がスクリプト管理外の場合は、上書きせずエラーで停止します。
+
+### 既存トンネルへIPv6を追加する
+
+既存Peerの鍵とIPv4アドレスを維持したまま、OCIと全Peerのサーバー側設定へULA IPv6を追加します。
+稼働中の`wg0`へ同期するため、WireGuardサービスは再起動しません。
+
+```bash
+./scripts/wg-relay.sh ipv6 enable
+```
+
+有効なトンネルIPv6を確認します。
+
+```bash
+./scripts/wg-relay.sh ipv6 show
+```
+
+Peer IPv6はIPv4の末尾を同じ数字のhextetとして自動対応させます。
+
+| Peer | IPv4 | IPv6 |
+| --- | --- | --- |
+| OCI | `10.99.0.1` | `fdae:3e62:c345:99::1` |
+| Windows | `10.99.0.2` | `fdae:3e62:c345:99::2` |
+| Mac | `10.99.0.3` | `fdae:3e62:c345:99::3` |
+| Peer 39 | `10.99.0.39` | `fdae:3e62:c345:99::39` |
+
+既存クライアントへは、`[Interface]`の`Address`と`[Peer]`の`AllowedIPs`へIPv6を追加します。
+Macを例にすると次の値です。秘密鍵、公開鍵、IPv4、Endpointは変更しません。
+
+```ini
+Address = 10.99.0.3/32, fdae:3e62:c345:99::3/128
+AllowedIPs = 10.99.0.0/24, fdae:3e62:c345:99::/64
+```
+
+新規Peerと鍵更新後の再発行設定には、対応するIPv6が自動的に含まれます。IPv6を利用できない
+クライアントでも既存IPv4は維持されるため、端末ごとに段階移行できます。
+
+WireGuard for macOS/iOSでは、設定上の`/128`が`ifconfig`上で`prefixlen 120`と表示されます。
+これはAppleのNetwork Extensionで`/120`より長いプレフィックスが機能しないことへの
+[WireGuard公式実装の回避策](https://git.zx2c4.com/wireguard-apple/commit/WireGuard/WireGuardNetworkExtension?id=a08a9ba4c4c9d578979583e8c2fe227de93ee4d1)です。
+クライアント設定は`/128`のまま維持し、サーバー側のPeer識別も`/128`を使用します。
+
+Peer間アクセスプリセットはIPv4とIPv6の両方へ同期されます。公開ポートのDNAT・SNATは
+引き続きIPv4専用であり、公開サービスへAAAAレコードを追加する条件にはなりません。
 
 ## 3. Windows Peerを追加する
 
