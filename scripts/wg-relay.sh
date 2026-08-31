@@ -28,7 +28,7 @@ usage() {
   cat <<'EOF'
 Usage:
   ./scripts/wg-relay.sh install
-  ./scripts/wg-relay.sh init [--server-address CIDR] [--listen-port PORT] [--endpoint HOST:PORT]
+  ./scripts/wg-relay.sh init [--server-address CIDR] [--listen-port PORT] [--endpoint HOST:PORT] [--mtu MTU]
   ./scripts/wg-relay.sh add NAME --address IPV4/32 [--output FILE|-]
   ./scripts/wg-relay.sh update NAME --address IPV4/32 [--output FILE|-]
   ./scripts/wg-relay.sh rename CURRENT_NAME NEW_NAME
@@ -112,6 +112,7 @@ init_remote() {
   local server_address="10.99.0.1/24"
   local listen_port="51820"
   local endpoint=""
+  local mtu="1380"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -130,6 +131,11 @@ init_remote() {
         endpoint="$2"
         shift 2
         ;;
+      --mtu)
+        [ "$#" -ge 2 ] || die "--mtu requires a value"
+        mtu="$2"
+        shift 2
+        ;;
       *) die "unknown init option: $1" ;;
     esac
   done
@@ -140,7 +146,8 @@ init_remote() {
   remote_command init \
     --server-address "${server_address}" \
     --listen-port "${listen_port}" \
-    --endpoint "${endpoint}"
+    --endpoint "${endpoint}" \
+    --mtu "${mtu}"
 }
 
 generate_client_config() {

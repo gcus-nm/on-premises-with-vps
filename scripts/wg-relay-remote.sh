@@ -16,8 +16,10 @@ readonly LOCK_FILE="/run/lock/wg-relay.lock"
 readonly MANAGED_MARKER="# Managed by wg-relay. Do not edit directly."
 readonly FIREWALL_COMMENT="wg-relay-listen"
 readonly FORWARD_FILTER_CHAIN="WG_RELAY_FORWARD"
+readonly FORWARD_MANGLE_CHAIN="WG_RELAY_MANGLE"
 readonly FORWARD_PREROUTING_CHAIN="WG_RELAY_PREROUTING"
 readonly FORWARD_POSTROUTING_CHAIN="WG_RELAY_POSTROUTING"
+readonly DEFAULT_MTU="1380"
 
 log() {
   printf 'wg-relay: %s\n' "$*" >&2
@@ -31,7 +33,7 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  wg-relay init --server-address CIDR --listen-port PORT --endpoint HOST:PORT
+  wg-relay init --server-address CIDR --listen-port PORT --endpoint HOST:PORT [--mtu MTU]
   wg-relay add NAME --address IPV4/32
   wg-relay update NAME --address IPV4/32
   wg-relay rename CURRENT_NAME NEW_NAME
@@ -123,6 +125,13 @@ validate_port() {
   [ "${port}" -ge 1 ] && [ "${port}" -le 65535 ] || die "port must be between 1 and 65535"
 }
 
+validate_mtu() {
+  local mtu="$1"
+  [[ "${mtu}" =~ ^[0-9]+$ ]] || die "MTU must be an integer"
+  [ "${mtu}" -ge 1280 ] && [ "${mtu}" -le 1420 ] ||
+    die "MTU must be between 1280 and 1420"
+}
+
 validate_protocol() {
   case "$1" in
     tcp | udp) ;;
@@ -174,6 +183,12 @@ read_setting() {
   awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${SETTINGS_FILE}"
 }
 
+wireguard_mtu() {
+  local mtu
+  mtu="$(read_setting MTU)"
+  printf '%s\n' "${mtu:-${DEFAULT_MTU}}"
+}
+
 ensure_initialized() {
   [ -f "${SETTINGS_FILE}" ] || die "relay is not initialized; run init first"
   [ -s "${PRIVATE_KEY_FILE}" ] || die "server private key is missing"
@@ -198,9 +213,10 @@ ensure_server_keys() {
 }
 
 render_config() {
-  local server_address listen_port private_key peer_file temporary_file
+  local server_address listen_port mtu private_key peer_file temporary_file
   server_address="$(read_setting SERVER_ADDRESS)"
   listen_port="$(read_setting LISTEN_PORT)"
+  mtu="$(wireguard_mtu)"
   private_key="$(tr -d '\r\n' <"${PRIVATE_KEY_FILE}")"
   temporary_file="$(mktemp --suffix=.conf "${WG_DIR}/wg0tmpXXXXXX")"
 
@@ -209,6 +225,7 @@ render_config() {
     printf '[Interface]\n'
     printf 'Address = %s\n' "${server_address}"
     printf 'ListenPort = %s\n' "${listen_port}"
+    printf 'MTU = %s\n' "${mtu}"
     printf 'PrivateKey = %s\n' "${private_key}"
     printf 'PostUp = %s firewall-sync\n' "$0"
     printf 'PostDown = %s firewall-clear\n' "$0"
@@ -310,11 +327,16 @@ firewall_sync() {
 
   ensure_firewall_rule
   ensure_chain filter "${FORWARD_FILTER_CHAIN}"
+  ensure_chain mangle "${FORWARD_MANGLE_CHAIN}"
   ensure_chain nat "${FORWARD_PREROUTING_CHAIN}"
   ensure_chain nat "${FORWARD_POSTROUTING_CHAIN}"
   ensure_jump filter FORWARD "${FORWARD_FILTER_CHAIN}"
+  ensure_jump mangle FORWARD "${FORWARD_MANGLE_CHAIN}"
   ensure_jump nat PREROUTING "${FORWARD_PREROUTING_CHAIN}"
   ensure_jump nat POSTROUTING "${FORWARD_POSTROUTING_CHAIN}"
+
+  iptables -w -t mangle -A "${FORWARD_MANGLE_CHAIN}" \
+    -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
   iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" \
     -i wg0 -o "${interface_name}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
@@ -360,6 +382,7 @@ firewall_sync() {
   done
 
   iptables -w -t filter -A "${FORWARD_FILTER_CHAIN}" -j RETURN
+  iptables -w -t mangle -A "${FORWARD_MANGLE_CHAIN}" -j RETURN
   iptables -w -t nat -A "${FORWARD_PREROUTING_CHAIN}" -j RETURN
   iptables -w -t nat -A "${FORWARD_POSTROUTING_CHAIN}" -j RETURN
 }
@@ -377,9 +400,11 @@ firewall_clear() {
   fi
 
   remove_jump filter FORWARD "${FORWARD_FILTER_CHAIN}"
+  remove_jump mangle FORWARD "${FORWARD_MANGLE_CHAIN}"
   remove_jump nat PREROUTING "${FORWARD_PREROUTING_CHAIN}"
   remove_jump nat POSTROUTING "${FORWARD_POSTROUTING_CHAIN}"
   remove_chain filter "${FORWARD_FILTER_CHAIN}"
+  remove_chain mangle "${FORWARD_MANGLE_CHAIN}"
   remove_chain nat "${FORWARD_PREROUTING_CHAIN}"
   remove_chain nat "${FORWARD_POSTROUTING_CHAIN}"
 }
@@ -421,14 +446,16 @@ PY
 write_client_config() {
   local client_private_key="$1"
   local client_address="$2"
-  local endpoint server_public_key
+  local endpoint mtu server_public_key
   endpoint="$(read_setting PUBLIC_ENDPOINT)"
+  mtu="$(wireguard_mtu)"
   server_public_key="$(tr -d '\r\n' <"${PUBLIC_KEY_FILE}")"
 
   cat <<EOF
 [Interface]
 PrivateKey = ${client_private_key}
 Address = ${client_address}
+MTU = ${mtu}
 
 [Peer]
 PublicKey = ${server_public_key}
@@ -731,6 +758,8 @@ list_forwards() {
 
 forward_status() {
   list_forwards
+  printf '\nTCP MSS rules:\n'
+  iptables -w -t mangle -S "${FORWARD_MANGLE_CHAIN}" 2>/dev/null || printf '(not applied)\n'
   printf '\nFilter rules:\n'
   iptables -w -t filter -S "${FORWARD_FILTER_CHAIN}" 2>/dev/null || printf '(not applied)\n'
   printf '\nDNAT rules:\n'
@@ -1156,6 +1185,7 @@ init_relay() {
   local server_address=""
   local listen_port=""
   local endpoint=""
+  local mtu="${DEFAULT_MTU}"
   local temporary_settings
 
   while [ "$#" -gt 0 ]; do
@@ -1175,6 +1205,11 @@ init_relay() {
         endpoint="$2"
         shift 2
         ;;
+      --mtu)
+        [ "$#" -ge 2 ] || die "--mtu requires a value"
+        mtu="$2"
+        shift 2
+        ;;
       *) die "unknown init option: $1" ;;
     esac
   done
@@ -1185,6 +1220,7 @@ init_relay() {
   validate_server_address "${server_address}"
   validate_port "${listen_port}"
   validate_endpoint "${endpoint}"
+  validate_mtu "${mtu}"
 
   if [ -e "${WG_CONFIG}" ] && ! grep -Fqx "${MANAGED_MARKER}" "${WG_CONFIG}"; then
     die "${WG_CONFIG} exists and is not managed by wg-relay"
@@ -1197,6 +1233,7 @@ init_relay() {
     printf 'SERVER_ADDRESS=%s\n' "${server_address}"
     printf 'LISTEN_PORT=%s\n' "${listen_port}"
     printf 'PUBLIC_ENDPOINT=%s\n' "${endpoint}"
+    printf 'MTU=%s\n' "${mtu}"
   } >"${temporary_settings}"
   install -o root -g root -m 0600 "${temporary_settings}" "${SETTINGS_FILE}"
   rm -f "${temporary_settings}"
@@ -1205,7 +1242,7 @@ init_relay() {
   systemctl enable wg-quick@wg0 >&2
   systemctl restart wg-quick@wg0
   firewall_sync
-  log "initialized relay at ${server_address}, endpoint ${endpoint}"
+  log "initialized relay at ${server_address}, endpoint ${endpoint}, MTU ${mtu}"
   printf '%s\n' "$(tr -d '\r\n' <"${PUBLIC_KEY_FILE}")"
 }
 
