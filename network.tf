@@ -131,6 +131,34 @@ resource "oci_core_network_security_group_security_rule" "egress_ipv6" {
   description               = "Allow relay outbound IPv6 traffic"
 }
 
+resource "oci_core_network_security_group_security_rule" "pmtu_ipv4" {
+  network_security_group_id = oci_core_network_security_group.relay.id
+  direction                 = "INGRESS"
+  protocol                  = "1"
+  source                    = "0.0.0.0/0"
+  source_type               = "CIDR_BLOCK"
+  description               = "Allow IPv4 Path MTU Discovery"
+
+  icmp_options {
+    type = 3
+    code = 4
+  }
+}
+
+resource "oci_core_network_security_group_security_rule" "pmtu_ipv6" {
+  network_security_group_id = oci_core_network_security_group.relay.id
+  direction                 = "INGRESS"
+  protocol                  = "58"
+  source                    = "::/0"
+  source_type               = "CIDR_BLOCK"
+  description               = "Allow IPv6 Path MTU Discovery"
+
+  icmp_options {
+    type = 2
+    code = 0
+  }
+}
+
 resource "oci_core_network_security_group_security_rule" "public_tcp" {
   for_each = local.tcp_ingress_rules
 

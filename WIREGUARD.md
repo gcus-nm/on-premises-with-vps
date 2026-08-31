@@ -81,6 +81,7 @@ WG_RELAY_SSH_HOST=別名 ./scripts/wg-relay.sh status
 - OCIトンネルアドレス: `10.99.0.1/24`
 - WireGuard待受ポート: `51820/udp`
 - 公開Endpoint: `terraform output wireguard_endpoint_ipv4`の値
+- WireGuard MTU: `1380`
 
 明示する場合:
 
@@ -88,7 +89,8 @@ WG_RELAY_SSH_HOST=別名 ./scripts/wg-relay.sh status
 ./scripts/wg-relay.sh init \
   --server-address 10.99.0.1/24 \
   --listen-port 51820 \
-  --endpoint 161.33.162.42:51820
+  --endpoint 161.33.162.42:51820 \
+  --mtu 1380
 ```
 
 すでにOCI上に`private.key`と`public.key`がある場合は再利用します。既存の`wg0.conf`がスクリプト管理外の場合は、上書きせずエラーで停止します。
@@ -230,6 +232,25 @@ Windowsから`ping 10.99.0.1`がタイムアウトする場合は、まずハン
 ```
 
 `latest handshake`が表示されない場合は、Windows側でトンネルが有効か、OCIのNSGとOSファイアウォールの両方でWireGuardのUDP待受ポートが許可されているかを確認してください。管理スクリプトを更新した直後は、`install`と`init`を再実行するとOSファイアウォール設定も反映されます。既存のPeerと鍵は維持されます。
+
+### 小さい通信だけ成功し、大きい応答が停止する場合
+
+このプロジェクトはWireGuardのMTUを`1380`へ固定し、VPSから`wg0`へ転送するTCP SYNの
+MSSを経路MTUへクランプします。OCIのVNICはMTU 9000のため、MTUを省略すると
+`wg-quick`がインターネット経路には大きすぎる値を選ぶ場合があります。IPv4 PPPoEなどの
+小さい経路MTUと組み合わさると、TLSハンドシェイク、JavaScript、画像、ゲーム通信など、
+一定サイズを超えるパケットだけが停止します。
+
+既存Peerの秘密鍵と登録は維持できます。管理スクリプトを更新して`init --mtu 1380`を再実行し、
+各端末のWireGuard設定の`[Interface]`にも次を追加してトンネルを再度有効にします。
+
+```ini
+MTU = 1380
+```
+
+OCI NSGではPath MTU Discoveryのため、IPv4 ICMP Type 3 Code 4と
+ICMPv6 Type 2 Code 0も許可します。TCP MSSクランプは転送TCPを直ちに小さくしますが、
+ICMPルールはUDPや将来のIPv6 Endpointを含む経路MTUの通知に必要です。
 
 ## Peer間アクセスプリセットを使う
 

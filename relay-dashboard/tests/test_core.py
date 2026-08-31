@@ -1485,6 +1485,29 @@ class TerraformPlanAnalysisTests(unittest.TestCase):
         self.assertTrue(analysis["safe"])
         self.assertEqual(analysis["counts"]["create"], 1)
 
+    def test_allows_path_mtu_discovery_nsg_rules(self) -> None:
+        plan = {
+            "resource_changes": [
+                {
+                    "address": (
+                        "oci_core_network_security_group_security_rule.pmtu_ipv4"
+                    ),
+                    "change": {"actions": ["create"]},
+                },
+                {
+                    "address": (
+                        "oci_core_network_security_group_security_rule.pmtu_ipv6"
+                    ),
+                    "change": {"actions": ["create"]},
+                },
+            ]
+        }
+
+        analysis = analyze_terraform_plan(plan)
+
+        self.assertTrue(analysis["safe"])
+        self.assertEqual(analysis["counts"]["create"], 2)
+
     def test_blocks_instance_change(self) -> None:
         plan = {
             "resource_changes": [

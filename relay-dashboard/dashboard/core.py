@@ -35,6 +35,10 @@ ALLOWED_TERRAFORM_PREFIXES = (
     "oci_core_network_security_group_security_rule.public_tcp[",
     "oci_core_network_security_group_security_rule.public_udp[",
 )
+ALLOWED_TERRAFORM_ADDRESSES = {
+    "oci_core_network_security_group_security_rule.pmtu_ipv4",
+    "oci_core_network_security_group_security_rule.pmtu_ipv6",
+}
 
 
 class DashboardError(Exception):
@@ -754,7 +758,10 @@ def analyze_terraform_plan(plan: dict[str, Any]) -> dict[str, Any]:
 
         item = {"address": address, "actions": actions}
         changes.append(item)
-        if not address.startswith(ALLOWED_TERRAFORM_PREFIXES):
+        if (
+            address not in ALLOWED_TERRAFORM_ADDRESSES
+            and not address.startswith(ALLOWED_TERRAFORM_PREFIXES)
+        ):
             unexpected.append(item)
 
     return {
