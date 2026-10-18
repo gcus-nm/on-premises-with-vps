@@ -2055,6 +2055,12 @@ function addAccessPortRow() {
   document.querySelector("#access-group-new-rows").append(row);
 }
 
+function createIdempotencyKey() {
+  // LAN内のHTTP接続でも利用できる乱数APIを使う（randomUUIDはセキュアコンテキスト限定）。
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return `access-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
 async function confirmAccessChange(request, path, method) {
   const preview = await api("/api/wireguard/access-preview", {method: "POST", body: request});
   const lines = preview.changes.flatMap((change) => [
@@ -2064,7 +2070,7 @@ async function confirmAccessChange(request, path, method) {
   ]);
   if (!window.confirm(`変更を保存しますか？\n${lines.length ? lines.join("\n") : "有効な通信許可の増減はありません。"}`)) return null;
   return api(path, {method, body: {...request, revision: preview.revision},
-    headers: {"Idempotency-Key": crypto.randomUUID()}});
+    headers: {"Idempotency-Key": createIdempotencyKey()}});
 }
 
 async function saveAccessGroup() {
