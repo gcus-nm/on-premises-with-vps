@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import os
 import stat
 import subprocess
@@ -1049,6 +1050,11 @@ class WireGuardManagementTests(unittest.TestCase):
                     "dashboard\ttcp\t10.99.0.3,10.99.0.5\t10.99.0.2:8081\n",
                     "",
                 )
+            if arguments == ["access-policy", "state"]:
+                return CommandResult(0, json.dumps({"access_groups": [], "assignments": {
+                    "mac": {"preset_names": ["dashboard"], "group_names": [], "access_paths": {"dashboard": [["dashboard"]]}},
+                    "iphone": {"preset_names": ["dashboard"], "group_names": []}
+                }}), "")
             raise AssertionError(arguments)
 
         state = RelayManager(
@@ -1064,6 +1070,7 @@ class WireGuardManagementTests(unittest.TestCase):
 
         peers = {peer["name"]: peer for peer in state["peers"]}
         self.assertEqual(peers["mac"]["access_presets"], ["dashboard"])
+        self.assertEqual(peers["mac"]["direct_presets"], ["dashboard"])
         self.assertEqual(peers["iphone"]["access_presets"], ["dashboard"])
         self.assertEqual(peers["windows"]["target_presets"], ["dashboard"])
         self.assertEqual(
@@ -1206,7 +1213,7 @@ class WireGuardManagementTests(unittest.TestCase):
                     "dashboard\ttcp\t10.99.0.3,10.99.0.5\t10.99.0.2:8081\n",
                     "",
                 )
-            return CommandResult(0, "", "")
+            return CommandResult(0, json.dumps({"revision": "test-revision", "ok": True}), "")
 
         manager = RelayManager(
             Path("/workspace/scripts/wg-relay.sh"),
@@ -1223,26 +1230,15 @@ class WireGuardManagementTests(unittest.TestCase):
             ),
         )
 
-        self.assertIn(
-            [
-                "peer-forward",
-                "update",
-                "dashboard",
-                "--protocol",
-                "tcp",
-                "--new-name",
-                "relay-dashboard",
-                "--source-address",
-                "10.99.0.3",
-                "--source-address",
-                "10.99.0.5",
-                "--target-address",
-                "10.99.0.2",
-                "--target-port",
-                "8443",
-            ],
-            commands,
-        )
+        policy_commands = [c for c in commands if c[0] == "access-policy"]
+        self.assertEqual([c[1] for c in policy_commands], ["preview", "apply"])
+        request = json.loads(base64.b64decode(policy_commands[-1][2]))
+        self.assertEqual(request["action"], "preset-update")
+        self.assertEqual(request["current_name"], "dashboard")
+        self.assertEqual(request["name"], "relay-dashboard")
+        self.assertEqual(request["target_port"], 8443)
+        self.assertEqual(request["revision"], "test-revision")
+        self.assertNotIn("source_addresses", request)
 
     def test_rejects_peer_rename_to_an_existing_name(self) -> None:
         def runner(

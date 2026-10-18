@@ -90,7 +90,7 @@ paths:
       operationId: getWireGuardState
       responses:
         '200':
-          description: Peer inventory, live status, reusable access presets, and the next available address
+          description: Peer inventory, live status, reusable access presets, access_groups, access_revision, and the next available address. Peer entries include direct_presets, access_groups, and access_paths in addition to effective access_presets
           content: { application/json: { schema: { type: object } } }
   /api/wireguard/peers:
     post:
@@ -142,8 +142,8 @@ paths:
     put:
       operationId: setWireGuardPeerAccessPresets
       description: >-
-        Atomically replaces the reusable access presets assigned to one source Peer and
-        immediately updates the relay ACL.
+        Atomically replaces only the directly assigned access presets of one source Peer,
+        preserving group assignments, and immediately updates the effective relay ACL.
       parameters:
         - $ref: '#/components/parameters/Csrf'
         - $ref: '#/components/parameters/PeerName'
@@ -164,6 +164,85 @@ paths:
         '200':
           description: Peer assignments replaced and relay ACL updated
           content: { application/json: { schema: { type: object } } }
+  /api/wireguard/access-preview:
+    post:
+      operationId: previewWireGuardAccess
+      description: Validates a proposed access change without writing state. Returns the revision required for applying it and effective permission additions/removals per Peer. Validation errors return 400.
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf: [ { $ref: '#/components/schemas/AccessChange' } ]
+              required: [action]
+      responses:
+        '200':
+          description: Validated change, current revision and affected Peers
+          content: { application/json: { schema: { $ref: '#/components/schemas/AccessPreview' } } }
+  /api/wireguard/access-groups:
+    post:
+      operationId: createWireGuardAccessGroup
+      description: Creates a group and optional new presets in one transaction. Uses the revision from access-preview.
+      parameters: [ { $ref: '#/components/parameters/Csrf' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccessChange' }
+      responses:
+        '201': { description: Group and presets saved and effective ACL applied }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/wireguard/access-groups/{name}:
+    parameters: [ { $ref: '#/components/parameters/AccessPresetName' } ]
+    put:
+      operationId: updateWireGuardAccessGroup
+      description: Replaces group members, optionally renames the group and creates presets. Updates all parent and Peer references and applies all affected ACLs in one transaction.
+      parameters: [ { $ref: '#/components/parameters/Csrf' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccessChange' }
+      responses:
+        '200': { description: Group saved and effective ACL applied }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      operationId: deleteWireGuardAccessGroup
+      description: Rejects deletion if referenced by any Peer or parent group. Deleting a group does not delete its presets or child groups.
+      parameters: [ { $ref: '#/components/parameters/Csrf' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision]
+              properties:
+                revision: { type: string }
+      responses:
+        '200': { description: Unreferenced group deleted }
+        '400': { description: Group is still referenced }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/wireguard/peers/{name}/access:
+    put:
+      operationId: setWireGuardPeerAccess
+      description: Replaces direct preset and group assignments together; applies their recursive union. Requires the revision from access-preview with action assign and peer_name.
+      parameters: [ { $ref: '#/components/parameters/Csrf' }, { $ref: '#/components/parameters/PeerName' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [preset_names, group_names, revision]
+              properties:
+                preset_names: { type: array, items: { $ref: '#/components/schemas/AccessItemName' } }
+                group_names: { type: array, items: { $ref: '#/components/schemas/AccessItemName' } }
+                revision: { type: string }
+      responses:
+        '200': { description: Direct assignments replaced and effective ACL applied }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/wireguard/access-presets:
     post:
       operationId: createWireGuardAccessPreset
@@ -189,7 +268,7 @@ paths:
           content: { application/json: { schema: { type: object } } }
     delete:
       operationId: deleteWireGuardAccessPreset
-      description: Deletes the preset and all source Peer assignments contained in it.
+      description: Deletes an unreferenced preset. Rejects deletion while referenced by any Peer or group.
       parameters:
         - $ref: '#/components/parameters/Csrf'
         - $ref: '#/components/parameters/AccessPresetName'
@@ -279,6 +358,45 @@ components:
     AccessPresetName:
       type: string
       pattern: '^[a-z0-9][a-z0-9-]{0,31}$'
+    AccessItemName:
+      type: string
+      pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$'
+    AccessChange:
+      type: object
+      description: Preview accepts action; mutation endpoints select action and target from their URL. group-create/update use name, preset_names, group_names, optional new_presets; assign uses peer_name and both assignment arrays. Apply requires revision. Group names and preset names are separate namespaces.
+      properties:
+        action: { type: string, enum: [group-create, group-update, group-delete, assign, preset-create, preset-update, preset-delete] }
+        current_name: { $ref: '#/components/schemas/AccessItemName' }
+        name: { $ref: '#/components/schemas/AccessItemName' }
+        peer_name: { $ref: '#/components/schemas/AccessItemName' }
+        preset_names: { type: array, items: { $ref: '#/components/schemas/AccessItemName' } }
+        group_names: { type: array, items: { $ref: '#/components/schemas/AccessItemName' } }
+        revision: { type: string }
+        new_presets:
+          type: array
+          items:
+            type: object
+            required: [name, protocol, target_address, target_port]
+            properties:
+              name: { $ref: '#/components/schemas/AccessItemName' }
+              protocol: { enum: [tcp, udp], type: string }
+              target_address: { type: string, format: ipv4 }
+              target_port: { type: integer, minimum: 1, maximum: 65535 }
+    AccessPreview:
+      type: object
+      required: [revision, changes, safe]
+      properties:
+        revision: { type: string, description: SHA-256 revision of the state used for validation }
+        safe: { const: true }
+        changes:
+          type: array
+          items:
+            type: object
+            required: [peer_name, added, removed]
+            properties:
+              peer_name: { type: string }
+              added: { type: array, items: { type: object, properties: { protocol: { type: string }, target_address: { type: string }, target_port: { type: integer } } } }
+              removed: { type: array, items: { type: object, properties: { protocol: { type: string }, target_address: { type: string }, target_port: { type: integer } } } }
     WireGuardArtifact:
       type: object
       additionalProperties: false

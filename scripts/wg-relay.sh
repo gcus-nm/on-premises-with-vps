@@ -50,6 +50,7 @@ Usage:
   ./scripts/wg-relay.sh peer-forward update NAME [--new-name NAME] --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
   ./scripts/wg-relay.sh peer-forward assign-source SOURCE_IPV4 [NAME...]
   ./scripts/wg-relay.sh peer-forward delete NAME [--yes]
+  ./scripts/wg-relay.sh access-policy state|preview|apply [BASE64_JSON]
   ./scripts/wg-relay.sh peer-forward list
   ./scripts/wg-relay.sh peer-forward status
 
@@ -416,6 +417,9 @@ main() {
       ;;
     forward)
       forward_remote "$@"
+      ;;
+    access-policy)
+      remote_command access-policy "$@"
       ;;
     peer-forward)
       peer_forward_remote "$@"

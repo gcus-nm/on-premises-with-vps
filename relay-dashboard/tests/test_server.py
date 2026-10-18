@@ -97,6 +97,60 @@ class DashboardServerTests(unittest.TestCase):
             finally:
                 error.close()
 
+    def test_access_group_preview_apply_and_idempotent_replay(self) -> None:
+        backend = Mock(return_value={"revision": "rev-one", "changes": [], "ok": True})
+        self.app.relay.access_policy = backend
+        csrf = self.app.csrf_token
+        body = {"name": "home", "preset_names": [], "group_names": []}
+        status, _ = self.request("/api/wireguard/access-preview", method="POST", csrf=csrf,
+                                 body={**body, "action": "group-create"})
+        self.assertEqual(status, 200)
+        self.assertEqual(backend.call_args.args[0], "preview")
+        for _ in range(2):
+            status, result = self.request("/api/wireguard/access-groups", method="POST", csrf=csrf,
+                                          body={**body, "revision": "rev-one"}, idempotency_key="group-create-0001")
+            self.assertEqual(status, 201)
+        self.assertEqual(backend.call_count, 2)
+        backend.reset_mock()
+        body.update(name="remote", revision="rev-two")
+        for _ in range(2):
+            status, _ = self.request("/api/wireguard/access-groups/home", method="PUT", csrf=csrf,
+                                     body=body, idempotency_key="group-update-0001")
+            self.assertEqual(status, 200)
+        self.assertEqual(backend.call_count, 1)
+        self.assertEqual(backend.call_args.args[1]["current_name"], "home")
+        status, _ = self.request("/api/wireguard/peers/laptop/access", method="PUT", csrf=csrf,
+                                 body={"preset_names": [], "group_names": ["remote"], "revision": "rev-two"})
+        self.assertEqual(status, 200)
+        self.assertEqual(backend.call_args.args[1]["peer_name"], "laptop")
+        status, _ = self.request("/api/wireguard/access-groups/remote", method="DELETE", csrf=csrf,
+                                 body={"revision": "rev-two"})
+        self.assertEqual(status, 200)
+        self.assertEqual(backend.call_args.args[1]["action"], "group-delete")
+
+    def test_access_group_security_conflicts_and_lock(self) -> None:
+        backend = Mock(return_value={"revision": "one", "changes": []})
+        self.app.relay.access_policy = backend
+        path = "/api/wireguard/access-groups"
+        status, _ = self.request(path, method="POST", body={})
+        self.assertEqual(status, 403)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(urllib.request.Request(self.base_url + path, data=b"{}", method="POST"))
+        self.assertEqual(caught.exception.code, 401)
+        caught.exception.close()
+        backend.assert_not_called()
+        self.app.operation_lock.acquire()
+        try:
+            status, _ = self.request(path, method="POST", body={}, csrf=self.app.csrf_token)
+            self.assertEqual(status, 409)
+        finally:
+            self.app.operation_lock.release()
+        backend.side_effect = ConflictError("プレビューを更新してください。")
+        status, body = self.request(path, method="POST", body={"name": "home"}, csrf=self.app.csrf_token)
+        self.assertEqual(status, 409)
+        self.assertIn("プレビュー", body["message"])
+        self.assertFalse(self.app.operation_lock.locked())
+
     def test_health_does_not_require_authentication(self) -> None:
         status, payload = self.request("/healthz", authenticated=False)
         self.assertEqual(status, 200)
