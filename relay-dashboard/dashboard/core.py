@@ -2640,6 +2640,29 @@ class RelayManager:
             raise CommandError("OCIリレー管理コマンドに失敗しました。", result.output)
         return result
 
+    def access_policy(self, operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        arguments = ["access-policy", operation]
+        if payload is not None:
+            arguments.append(base64.b64encode(json.dumps(payload).encode()).decode())
+        environment = child_process_environment()
+        environment["WG_RELAY_SSH_HOST"] = self.ssh_host
+        result = self.runner(["bash", str(self.script), *arguments], environment,
+                             self.script.parent.parent, self.timeout)
+        try:
+            value = json.loads(result.stdout)
+            if not isinstance(value, dict):
+                raise ValueError("JSON object required")
+        except (ValueError, TypeError) as error:
+            raise CommandError("リレーのアクセスグループAPIを確認してください。管理スクリプトの更新が必要です。", result.output) from error
+        if result.returncode:
+            message = value.get("message", "アクセス設定の操作に失敗しました。")
+            if value.get("error") == "conflict":
+                raise ConflictError(message)
+            if value.get("error") == "validation":
+                raise ValidationError(message)
+            raise CommandError(message, result.output)
+        return value
+
     def list(self) -> dict[str, RelayRoute]:
         return parse_relay_routes(self._run(["forward", "list"]).stdout)
 
@@ -2663,6 +2686,7 @@ class RelayManager:
         peers = self.list_peers()
         statuses = parse_wireguard_status(self._run(["status"]).stdout)
         presets = self.list_peer_access_presets()
+        policy = self.access_policy("state")
         references: dict[str, list[str]] = {peer.address: [] for peer in peers.values()}
         assigned: dict[str, list[str]] = {peer.address: [] for peer in peers.values()}
         targets: dict[str, list[str]] = {peer.address: [] for peer in peers.values()}
@@ -2687,6 +2711,9 @@ class RelayManager:
                     "access_rules": sorted(references.get(peer.address, [])),
                     "access_presets": sorted(assigned.get(peer.address, [])),
                     "target_presets": sorted(targets.get(peer.address, [])),
+                    "direct_presets": policy.get("assignments", {}).get(peer.name, {}).get("preset_names", []),
+                    "access_groups": policy.get("assignments", {}).get(peer.name, {}).get("group_names", []),
+                    "access_paths": policy.get("assignments", {}).get(peer.name, {}).get("access_paths", {}),
                 }
             )
         preset_rows = [
@@ -2695,6 +2722,8 @@ class RelayManager:
         ]
         return {
             "peers": peer_rows,
+            "access_groups": policy.get("access_groups", []),
+            "access_revision": policy.get("revision"),
             "access_presets": preset_rows,
             # Retained during the access-rule to access-preset API transition.
             "access_rules": [
@@ -2941,10 +2970,11 @@ class RelayManager:
             raise ConflictError(
                 f"アクセスプリセット名はすでに使用されています: {preset.name}"
             )
-        self.update_peer_access_preset(
-            replace(preset, source_addresses=current.source_addresses),
-            current_name=normalized_current_name,
-        )
+        request = {"action": "preset-update", "current_name": normalized_current_name,
+                   "name": preset.name, "protocol": preset.protocol,
+                   "target_address": preset.target_address, "target_port": preset.target_port}
+        check = self.access_policy("preview", request)
+        self.access_policy("apply", {**request, "revision": check["revision"]})
 
     def delete_peer_access_rule(self, name: Any) -> str:
         return self.delete_peer_access_preset(name)

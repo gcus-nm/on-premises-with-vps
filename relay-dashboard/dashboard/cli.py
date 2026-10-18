@@ -209,6 +209,17 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--confirm")
     create.add_argument("--idempotency-key")
 
+    for command_name, operations in (("access-group", ("create", "update", "delete")),
+                                     ("peer-access", ("set",))):
+        access = commands.add_parser(command_name)
+        subcommands = access.add_subparsers(dest="access_command", required=True)
+        for operation in operations:
+            mutation = subcommands.add_parser(operation)
+            mutation.add_argument("--input", required=True, help="プレビュー済みrevisionを含むJSON。標準入力は-")
+            mutation.add_argument("--dry-run", action="store_true")
+            mutation.add_argument("--confirm")
+            mutation.add_argument("--idempotency-key")
+
     plan = commands.add_parser("plan")
     plan.add_argument("--idempotency-key")
     for name in ("apply", "sync"):
@@ -253,6 +264,30 @@ def run(arguments: argparse.Namespace, client: RelayClient) -> object:
             body=body,
             idempotency_key=key,
         )
+    if arguments.command in {"access-group", "peer-access"}:
+        body = input_object(arguments.input)
+        operation = arguments.access_command
+        if arguments.command == "peer-access":
+            body["action"] = "assign"
+            path = f"/api/wireguard/peers/{quote(str(body.get('peer_name', '')), safe='')}/access"
+            method = "PUT"
+        else:
+            body["action"] = f"group-{operation}"
+            current = body.get("current_name", body.get("name", ""))
+            body["current_name"] = current
+            path = "/api/wireguard/access-groups"
+            if operation != "create":
+                path += "/" + quote(str(current), safe="")
+            method = {"create": "POST", "update": "PUT", "delete": "DELETE"}[operation]
+        if arguments.dry_run:
+            if arguments.confirm or arguments.idempotency_key:
+                raise CliError("usage_error", "--dry-run cannot be combined with change confirmation", exit_code=2)
+            return client.request("/api/wireguard/access-preview", method="POST", body=body)
+        key = require_change_confirmation(client, arguments.confirm,
+                                          arguments.idempotency_key or os.environ.get("RELAY_IDEMPOTENCY_KEY"))
+        if not isinstance(body.get("revision"), str) or not body["revision"]:
+            raise CliError("input_error", "先に--dry-runで確認し、結果のrevisionを入力JSONへ追加してください。", exit_code=4)
+        return client.request(path, method=method, body=body, idempotency_key=key)
     if arguments.command == "plan":
         return client.request(
             "/api/plan",

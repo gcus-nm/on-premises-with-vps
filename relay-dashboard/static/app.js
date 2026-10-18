@@ -18,6 +18,7 @@ const appState = {
   collapsedGroups: loadCollapsedGroups(),
   peers: [],
   accessPresets: [],
+  accessGroups: [],
   suggestedPeerAddress: "",
   relayNetwork: "10.99.0.0/24",
   dashboardTargetAddress: "10.99.0.2",
@@ -245,6 +246,7 @@ async function loadWireGuard() {
     const payload = await api("/api/wireguard");
     appState.peers = payload.peers || [];
     appState.accessPresets = payload.access_presets || payload.access_rules || [];
+    appState.accessGroups = payload.access_groups || [];
     appState.suggestedPeerAddress = payload.suggested_address || "";
     appState.relayNetwork = payload.relay_network || appState.relayNetwork;
     appState.dashboardTargetAddress =
@@ -280,6 +282,7 @@ function render() {
 function renderWireGuard() {
   const locked = appState.busy || appState.wireguardLoading;
   document.querySelector("#new-peer-button").disabled = locked;
+  document.querySelector("#new-access-group-button").disabled = locked;
   document.querySelector("#new-access-rule-button").disabled =
     locked || appState.peers.length < 1;
   document.querySelector("#wireguard-refresh-button").disabled =
@@ -298,6 +301,7 @@ function renderWireGuard() {
   elements.wireguardPeerList.innerHTML = appState.peers.length
     ? appState.peers.map((peer) => renderPeerItem(peer, locked)).join("")
     : '<p class="muted">登録済みPeerはありません。</p>';
+  renderAccessGroups(locked);
   elements.wireguardAccessList.innerHTML = appState.accessPresets.length
     ? appState.accessPresets.map((preset) => renderAccessPresetItem(preset, locked)).join("")
     : '<p class="muted">アクセスプリセットはありません。</p>';
@@ -307,7 +311,7 @@ function renderPeerItem(peer, locked) {
   const connected = peer.latest_handshake && peer.latest_handshake !== "未接続";
   const assignedPresets = peer.access_presets || [];
   const targetPresets = peer.target_presets || [];
-  const canAssignAccess = appState.accessPresets.some(
+  const canAssignAccess = appState.accessGroups.length > 0 || (peer.direct_presets || []).length > 0 || appState.accessPresets.some(
     (preset) => preset.target_address !== peer.address,
   );
   return `
@@ -335,6 +339,9 @@ function renderPeerItem(peer, locked) {
       </div>
       <p class="wireguard-reference">
         ${assignedPresets.length ? `利用許可: ${escapeHtml(assignedPresets.join(", "))}` : "利用許可プリセットなし"}
+        <br>直接指定: ${escapeHtml((peer.direct_presets || []).join(", ") || "なし")}
+        <br>グループ: ${escapeHtml((peer.access_groups || []).join(", ") || "なし")}
+        ${Object.entries(peer.access_paths || {}).map(([preset, paths]) => `<br>${escapeHtml(preset)}: ${paths.map((path) => escapeHtml(path.join(" → "))).join(" / ")}`).join("")}
         ${targetPresets.length ? `<br>接続先: ${escapeHtml(targetPresets.join(", "))}` : ""}
       </p>
       <div class="wireguard-item-actions">
@@ -1967,7 +1974,7 @@ async function saveAccessPreset() {
 
 async function deleteAccessPreset(name) {
   const confirmation = window.prompt(
-    `${name}とすべてのPeer割り当てをOCIから削除します。\n続行する場合は DELETE と入力してください。`,
+    `${name}を削除します。参照中の場合は先に割り当てを解除してください。\n続行する場合は DELETE と入力してください。`,
   );
   if (confirmation !== "DELETE") return;
   try {
@@ -1983,6 +1990,119 @@ async function deleteAccessPreset(name) {
   } catch (error) {
     toast(firstLine(error.message), true);
   }
+}
+
+function accessChecks(items, selected) {
+  return items.map((item) => `<label class="preset-assignment-row"><input type="checkbox" value="${escapeAttribute(item.name)}" ${selected.includes(item.name) ? "checked" : ""}><span>${escapeHtml(item.name)}</span></label>`).join("") || '<p class="muted">登録なし</p>';
+}
+
+function checkedAccessNames(selector) {
+  return Array.from(document.querySelectorAll(`${selector} input:checked`), (input) => input.value);
+}
+
+function renderAccessGroups(locked) {
+  const groupByName = new Map(appState.accessGroups.map((group) => [group.name, group]));
+  const parents = new Map();
+  for (const group of appState.accessGroups) {
+    for (const child of group.group_names) parents.set(child, (parents.get(child) || 0) + 1);
+  }
+  // 明示スタックにより深い階層も表示できる。同じ定義は各参照位置に表示する。
+  function tree(start) {
+    const lines = [];
+    const pending = [{name: start, path: []}];
+    while (pending.length) {
+      const {name, path} = pending.pop();
+      const group = groupByName.get(name);
+      if (!group || path.includes(name)) continue;
+      const route = [...path, name];
+      lines.push(`${escapeHtml(route.join(" → "))}${(parents.get(name) || 0) > 1 ? " （共有）" : ""}`);
+      for (const preset of group.preset_names) lines.push(escapeHtml([...route, preset].join(" → ")));
+      for (const child of [...group.group_names].reverse()) pending.push({name: child, path: route});
+    }
+    return lines.join("<br>");
+  }
+  document.querySelector("#access-group-list").innerHTML = appState.accessGroups.map((group) => `
+    <article class="wireguard-item"><strong>${escapeHtml(group.name)}</strong>
+      <p class="muted">${tree(group.name)}</p>
+      <small>${escapeHtml((group.references || []).join(", ") || "参照なし")}</small>
+      <div class="wireguard-item-actions">
+        <button class="small-button" data-access-group-edit="${escapeAttribute(group.name)}" ${locked ? "disabled" : ""}>編集</button>
+        <button class="small-button danger" data-access-group-delete="${escapeAttribute(group.name)}" ${locked ? "disabled" : ""}>削除</button>
+      </div>
+    </article>`).join("") || '<p class="muted">アクセスグループはありません。</p>';
+}
+
+function openAccessGroup(name = "") {
+  if (appState.busy || appState.wireguardLoading) return;
+  const group = appState.accessGroups.find((item) => item.name === name);
+  document.querySelector("#access-group-form").reset();
+  document.querySelector("#access-group-original").value = name;
+  document.querySelector("#access-group-name").value = name;
+  document.querySelector("#access-group-title").textContent = name ? `${name} を編集` : "アクセスグループを作成";
+  document.querySelector("#access-group-presets").innerHTML = accessChecks(appState.accessPresets, group?.preset_names || []);
+  document.querySelector("#access-group-children").innerHTML = accessChecks(appState.accessGroups.filter((item) => item.name !== name), group?.group_names || []);
+  document.querySelector("#access-group-target").innerHTML = appState.peers.map((peer) => `<option value="${escapeAttribute(peer.address)}">${escapeHtml(peerLabel(peer.address))}</option>`).join("");
+  document.querySelector("#access-group-new-rows").innerHTML = "";
+  document.querySelector("#access-group-error").textContent = "";
+  document.querySelector("#access-group-dialog").showModal();
+}
+
+function addAccessPortRow() {
+  const row = document.createElement("div");
+  row.className = "access-port-row";
+  row.innerHTML = '<label>名前<input data-port-name required maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,31}"></label><label>プロトコル<select data-port-protocol><option value="tcp">TCP</option><option value="udp">UDP</option></select></label><label>ポート<input data-port-number type="number" min="1" max="65535" required></label><button class="small-button" type="button" data-remove-port>削除</button>';
+  row.querySelector("[data-remove-port]").addEventListener("click", () => row.remove());
+  document.querySelector("#access-group-new-rows").append(row);
+}
+
+async function confirmAccessChange(request, path, method) {
+  const preview = await api("/api/wireguard/access-preview", {method: "POST", body: request});
+  const lines = preview.changes.flatMap((change) => [
+    change.peer_name,
+    ...change.added.map((item) => `  許可を追加: ${item.target_address} ${item.protocol.toUpperCase()}/${item.target_port}`),
+    ...change.removed.map((item) => `  許可を解除: ${item.target_address} ${item.protocol.toUpperCase()}/${item.target_port}`),
+  ]);
+  if (!window.confirm(`変更を保存しますか？\n${lines.length ? lines.join("\n") : "有効な通信許可の増減はありません。"}`)) return null;
+  return api(path, {method, body: {...request, revision: preview.revision},
+    headers: {"Idempotency-Key": crypto.randomUUID()}});
+}
+
+async function saveAccessGroup() {
+  const form = document.querySelector("#access-group-form");
+  if (!form.reportValidity()) return;
+  const original = document.querySelector("#access-group-original").value;
+  const request = {
+    action: original ? "group-update" : "group-create", current_name: original || document.querySelector("#access-group-name").value,
+    name: document.querySelector("#access-group-name").value,
+    preset_names: checkedAccessNames("#access-group-presets"), group_names: checkedAccessNames("#access-group-children"),
+    new_presets: Array.from(document.querySelectorAll(".access-port-row"), (row) => ({
+      name: row.querySelector("[data-port-name]").value, protocol: row.querySelector("[data-port-protocol]").value,
+      target_address: document.querySelector("#access-group-target").value, target_port: Number(row.querySelector("[data-port-number]").value),
+    })),
+  };
+  const button = document.querySelector("#save-access-group");
+  setButtonBusy(button, true, "確認中…");
+  try {
+    const result = await confirmAccessChange(request, original ? `/api/wireguard/access-groups/${encodeURIComponent(original)}` : "/api/wireguard/access-groups", original ? "PUT" : "POST");
+    if (!result) return;
+    document.querySelector("#access-group-dialog").close();
+    await refreshAfterWireGuardMutation();
+    toast(result.message);
+  } catch (error) {
+    document.querySelector("#access-group-error").textContent = firstLine(error.message);
+  } finally {
+    setButtonBusy(button, false, "変更を確認して保存");
+  }
+}
+
+async function deleteAccessGroup(name) {
+  if (appState.busy || appState.wireguardLoading) return;
+  try {
+    const result = await confirmAccessChange({action: "group-delete", current_name: name}, `/api/wireguard/access-groups/${encodeURIComponent(name)}`, "DELETE");
+    if (!result) return;
+    await refreshAfterWireGuardMutation();
+    toast(result.message);
+  } catch (error) { toast(firstLine(error.message), true); }
 }
 
 function openPeerAccessAssignment(name) {
@@ -2002,7 +2122,7 @@ function openPeerAccessAssignment(name) {
               <input
                 type="checkbox"
                 value="${escapeAttribute(preset.name)}"
-                ${(peer.access_presets || []).includes(preset.name) ? "checked" : ""}
+                ${(peer.direct_presets || []).includes(preset.name) ? "checked" : ""}
               >
               <span>
                 <strong>${escapeHtml(preset.name)}</strong>
@@ -2013,8 +2133,9 @@ function openPeerAccessAssignment(name) {
         )
         .join("")
     : '<p class="muted">このPeerへ割り当て可能なプリセットはありません。</p>';
+  document.querySelector("#peer-access-group-list").innerHTML = accessChecks(appState.accessGroups, peer.access_groups || []);
   elements.peerAccessFormError.textContent = "";
-  elements.savePeerAccessButton.disabled = !availablePresets.length;
+  elements.savePeerAccessButton.disabled = false;
   elements.peerAccessDialog.showModal();
 }
 
@@ -2028,13 +2149,11 @@ async function savePeerAccessAssignment() {
   elements.peerAccessFormError.textContent = "";
   setButtonBusy(elements.savePeerAccessButton, true, "反映中…");
   try {
-    const payload = await api(
-      `/api/wireguard/peers/${encodeURIComponent(peerName)}/access-presets`,
-      {
-        method: "PUT",
-        body: { preset_names: presetNames },
-      },
-    );
+    const request = { action: "assign", peer_name: peerName, preset_names: presetNames,
+      group_names: checkedAccessNames("#peer-access-group-list") };
+    const payload = await confirmAccessChange(request,
+      `/api/wireguard/peers/${encodeURIComponent(peerName)}/access`, "PUT");
+    if (!payload) return;
     elements.peerAccessDialog.close();
     await refreshAfterWireGuardMutation();
     toast(payload.message || "アクセスプリセットの割り当てを更新しました。");
@@ -2224,3 +2343,13 @@ loadState()
   .catch((error) => {
     toast(firstLine(error.message), true);
   });
+
+ document.querySelector("#new-access-group-button").addEventListener("click", () => openAccessGroup());
+ document.querySelector("#access-group-add-row").addEventListener("click", addAccessPortRow);
+ document.querySelector("#save-access-group").addEventListener("click", saveAccessGroup);
+ document.querySelector("#access-group-list").addEventListener("click", (event) => {
+   const edit = event.target.closest("[data-access-group-edit]");
+   const remove = event.target.closest("[data-access-group-delete]");
+   if (edit) openAccessGroup(edit.dataset.accessGroupEdit);
+   if (remove) deleteAccessGroup(remove.dataset.accessGroupDelete);
+ });

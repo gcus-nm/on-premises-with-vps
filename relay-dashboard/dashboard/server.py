@@ -347,6 +347,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self.read_json()
+            if self.handle_access_policy(path, payload):
+                return
             if not self.prepare_idempotency(path, payload):
                 return
             if path == "/api/wireguard/peers":
@@ -669,6 +671,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self.authenticate() or not self.validate_csrf():
             return
         path = urlparse(self.path).path
+        if self.is_access_policy_path(path):
+            try:
+                self.handle_access_policy(path, self.read_json())
+            except (DashboardError, ValueError) as exc:
+                self.send_error_json(error_status(exc), str(exc), command_output(exc))
+            return
         if not self.acquire_operation():
             return
         try:
@@ -926,6 +934,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self.authenticate() or not self.validate_csrf():
             return
         path = urlparse(self.path).path
+        if self.is_access_policy_path(path):
+            try:
+                self.handle_access_policy(path, self.read_json())
+            except (DashboardError, ValueError) as exc:
+                self.send_error_json(error_status(exc), str(exc), command_output(exc))
+            return
         if not self.acquire_operation():
             return
         try:
@@ -1287,6 +1301,52 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
         return payload
 
+    @staticmethod
+    def is_access_policy_path(path: str) -> bool:
+        return (path in {"/api/wireguard/access-preview", "/api/wireguard/access-groups"}
+                or path.startswith("/api/wireguard/access-groups/")
+                or (path.startswith("/api/wireguard/peers/") and path.endswith("/access")))
+
+    def handle_access_policy(self, path: str, payload: dict[str, object]) -> bool:
+        if not self.is_access_policy_path(path):
+            return False
+        preview = path == "/api/wireguard/access-preview" and self.command == "POST"
+        request = dict(payload)
+        group_prefix = "/api/wireguard/access-groups/"
+        if preview:
+            pass
+        elif path == "/api/wireguard/access-groups" and self.command == "POST":
+            request["action"] = "group-create"
+            request["current_name"] = payload.get("name")
+        elif path.startswith(group_prefix) and self.command in {"PUT", "DELETE"}:
+            request["action"] = "group-delete" if self.command == "DELETE" else "group-update"
+            request["current_name"] = unquote(path[len(group_prefix):])
+        elif path.startswith("/api/wireguard/peers/") and self.command == "PUT":
+            request["action"] = "assign"
+            if not isinstance(payload.get("preset_names"), list) or not isinstance(payload.get("group_names"), list):
+                raise ValidationError("preset_namesとgroup_namesの両方を配列で指定してください。")
+            request["peer_name"] = unquote(path[len("/api/wireguard/peers/"):-len("/access")])
+        else:
+            raise ValidationError("未対応のアクセス設定APIです。")
+        if not self.acquire_operation():
+            return True
+        try:
+            # Check/replay under the operation lock to prevent simultaneous duplicate execution.
+            if not preview and not self.prepare_idempotency(path, payload):
+                return True
+            result = self.app.relay.access_policy("preview" if preview else "apply", request)
+            detail = {key: request[key] for key in ("action", "name", "current_name", "peer_name") if key in request}
+            detail["changes"] = result.get("changes", [])
+            self.app.audit.append("wireguard-access-preview" if preview else "wireguard-access-update",
+                                  "success", json.dumps(detail, ensure_ascii=False))
+            self.send_json(result, HTTPStatus.CREATED if request.get("action") == "group-create" and not preview else HTTPStatus.OK)
+        except (DashboardError, ValueError) as exc:
+            self.app.audit.append("wireguard-access-update", "failed", str(exc))
+            raise
+        finally:
+            self.app.operation_lock.release()
+        return True
+
     def acquire_operation(self) -> bool:
         if self.app.operation_lock.acquire(blocking=False):
             return True
@@ -1302,7 +1362,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not key:
             return True
         endpoint = (self.command, path)
-        if endpoint not in IDEMPOTENT_ENDPOINTS:
+        if endpoint not in IDEMPOTENT_ENDPOINTS and not self.is_access_policy_path(path):
             raise ValidationError("このAPIは冪等性キーに対応していません。")
         if not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
             raise ValidationError(

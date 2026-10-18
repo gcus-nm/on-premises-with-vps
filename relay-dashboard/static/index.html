@@ -291,6 +291,13 @@
               <p class="panel-note">
                 接続先とポートを一度登録し、各Peerへ割り当てます。公開NSGやTerraformは変更しません。
               </p>
+              <div class="panel-heading compact">
+                <h3>アクセスグループ</h3>
+                <button class="button" id="new-access-group-button" type="button">＋ グループ</button>
+              </div>
+              <p class="panel-note">グループを組み合わせて、複数の通信をまとめてPeerへ許可できます。</p>
+              <div class="wireguard-list" id="access-group-list"></div>
+              <h3>プリセット</h3>
               <div class="wireguard-list" id="wireguard-access-list">
                 <p class="muted">読み込み中です。</p>
               </div>
@@ -751,6 +758,30 @@
       </form>
     </dialog>
 
+    <dialog id="access-group-dialog" class="wide-dialog">
+      <form method="dialog" id="access-group-form">
+        <div class="dialog-heading"><h2 id="access-group-title">アクセスグループ</h2>
+          <button class="icon-button" type="submit" value="cancel" formnovalidate aria-label="閉じる">×</button></div>
+        <input type="hidden" id="access-group-original">
+        <div class="dialog-fields">
+          <label>グループ名<input id="access-group-name" required maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,31}"></label>
+          <p class="muted">名前は英数字・ハイフン・アンダースコアで指定します。子グループは複数の親で共有できます。</p>
+          <h3>既存プリセット</h3><div id="access-group-presets" class="preset-assignment-list"></div>
+          <h3>子グループ</h3><div id="access-group-children" class="preset-assignment-list"></div>
+          <h3>プリセットをまとめて新規登録</h3>
+          <label>接続先Peer<select id="access-group-target"></select></label>
+          <div id="access-group-new-rows"></div>
+          <button class="button" id="access-group-add-row" type="button">＋ ポートを追加</button>
+          <p class="muted">新規プリセットはこのグループへ追加され、グループと同時に保存されます。</p>
+        </div>
+        <p id="access-group-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="button button-quiet" type="submit" value="cancel" formnovalidate>キャンセル</button>
+          <button class="button button-primary" id="save-access-group" type="button">変更を確認して保存</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="peer-access-dialog">
       <form method="dialog" id="peer-access-form">
         <div class="dialog-heading">
@@ -771,7 +802,10 @@
           <p class="muted">
             このPeerから利用を許可する接続先を選択します。保存するとOCIのACLへ一括反映されます。
           </p>
+          <h3>直接許可するプリセット</h3>
           <div class="preset-assignment-list" id="peer-access-preset-list"></div>
+          <h3>許可するグループ</h3><div class="preset-assignment-list" id="peer-access-group-list"></div>
+          <p class="muted">グループ配下の許可は自動で合算されます。別の経路で許可されている通信は、片方を外しても残ります。</p>
         </div>
         <p class="form-error" id="peer-access-form-error" role="alert"></p>
         <div class="dialog-actions">

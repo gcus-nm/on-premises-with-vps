@@ -55,6 +55,7 @@ Usage:
   wg-relay peer-forward update NAME [--new-name NAME] --protocol tcp|udp [--source-address IPV4]... --target-address IPV4 --target-port PORT
   wg-relay peer-forward assign-source SOURCE_IPV4 [NAME...]
   wg-relay peer-forward delete NAME
+  wg-relay access-policy state|preview|apply [BASE64_JSON]
   wg-relay peer-forward list
   wg-relay peer-forward status
 
@@ -627,6 +628,16 @@ firewall_clear() {
   remove_chain nat "${FORWARD_POSTROUTING_CHAIN}"
 }
 
+# systemdのPostUp/PostDownが親のロックを再取得して待ち合わせないようにする。
+# このマーカーはロック取得済みのサービス操作中だけ存在する。
+relay_systemctl() {
+  local result=0
+  printf '%s\n' "$$" >"${LOCK_FILE}.service-owner"
+  systemctl "$@" || result=$?
+  rm -f "${LOCK_FILE}.service-owner"
+  return "${result}"
+}
+
 sync_interface() {
   if systemctl is-active --quiet wg-quick@wg0; then
     wg syncconf wg0 <(wg-quick strip "${WG_CONFIG}")
@@ -634,7 +645,7 @@ sync_interface() {
       ip -6 address replace "$(server_ipv6_address)" dev wg0
     fi
   else
-    systemctl enable --now wg-quick@wg0 >&2
+    relay_systemctl enable --now wg-quick@wg0 >&2
   fi
   firewall_sync
 }
@@ -1051,6 +1062,7 @@ ensure_registered_peer_address() {
 
 ensure_peer_address_not_referenced() {
   local address="${1%/*}"
+  access_policy_engine peer-check "${address}" || die "Peerのアクセス割り当てを先に解除してください。"
   local peer_forward_file source_address source_addresses target_address peer_forward_name
   local -a peer_sources
 
@@ -1072,190 +1084,6 @@ ensure_peer_address_not_referenced() {
   done
 }
 
-check_peer_forward_available() {
-  local protocol="$1"
-  local source_addresses="$2"
-  local target_address="$3"
-  local target_port="$4"
-  local excluded_name="${5:-}"
-  local peer_forward_file existing_name existing_protocol existing_sources existing_target existing_port
-
-  for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
-    [ -f "${peer_forward_file}" ] || continue
-    existing_name="$(basename "${peer_forward_file}" .conf)"
-    [ "${existing_name}" = "${excluded_name}" ] && continue
-    existing_protocol="$(read_forward_setting PROTOCOL "${peer_forward_file}")"
-    existing_sources="$(read_peer_forward_sources "${peer_forward_file}")"
-    existing_target="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
-    existing_port="$(read_forward_setting TARGET_PORT "${peer_forward_file}")"
-    if [ "${existing_protocol}" = "${protocol}" ] &&
-      [ "${existing_sources}" = "${source_addresses}" ] &&
-      [ "${existing_target}" = "${target_address}" ] &&
-      [ "${existing_port}" = "${target_port}" ]; then
-      die "the same peer-forward is already assigned to ${existing_name}"
-    fi
-  done
-}
-
-apply_peer_forward() {
-  local mode="$1"
-  local name="$2"
-  shift 2
-  local new_name="${name}"
-  local new_name_provided=false
-  local protocol=""
-  local source_address source_addresses_text=""
-  local -a source_addresses=()
-  local target_address=""
-  local target_port=""
-  local current_file destination_file temporary_file backup_file action_label
-
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --protocol)
-        [ "$#" -ge 2 ] || die "--protocol requires a value"
-        protocol="$2"
-        shift 2
-        ;;
-      --new-name)
-        [ "$#" -ge 2 ] || die "--new-name requires a value"
-        new_name="$2"
-        new_name_provided=true
-        shift 2
-        ;;
-      --source-address)
-        [ "$#" -ge 2 ] || die "--source-address requires a value"
-        source_addresses+=("$2")
-        shift 2
-        ;;
-      --target-address)
-        [ "$#" -ge 2 ] || die "--target-address requires a value"
-        target_address="$2"
-        shift 2
-        ;;
-      --target-port)
-        [ "$#" -ge 2 ] || die "--target-port requires a value"
-        target_port="$2"
-        shift 2
-        ;;
-      *) die "unknown peer-forward option: $1" ;;
-    esac
-  done
-
-  ensure_initialized
-  validate_name "${name}"
-  validate_name "${new_name}"
-  if [ "${mode}" != "update" ] && ${new_name_provided}; then
-    die "--new-name can only be used with peer-forward update"
-  fi
-  [ -n "${protocol}" ] || die "--protocol is required"
-  [ -n "${target_address}" ] || die "--target-address is required"
-  [ -n "${target_port}" ] || die "--target-port is required"
-  validate_protocol "${protocol}"
-  validate_target_address "${target_address}"
-  validate_port "${target_port}"
-  ensure_registered_peer_address "${target_address}"
-  for source_address in "${source_addresses[@]}"; do
-    validate_target_address "${source_address}"
-    [ "${source_address}" != "${target_address}" ] || die "source and target addresses must differ"
-    ensure_registered_peer_address "${source_address}"
-    case ",${source_addresses_text}," in
-      *",${source_address},"*) ;;
-      *)
-        if [ -n "${source_addresses_text}" ]; then
-          source_addresses_text="${source_addresses_text},${source_address}"
-        else
-          source_addresses_text="${source_address}"
-        fi
-        ;;
-    esac
-  done
-  check_peer_forward_available "${protocol}" "${source_addresses_text}" "${target_address}" "${target_port}" "${name}"
-
-  current_file="${PEER_FORWARD_DIR}/${name}.conf"
-  destination_file="${PEER_FORWARD_DIR}/${new_name}.conf"
-  if [ "${mode}" = "add" ] && [ -e "${destination_file}" ]; then
-    die "peer-forward already exists: ${name}"
-  fi
-  if [ "${mode}" = "update" ] && [ ! -e "${current_file}" ]; then
-    die "peer-forward does not exist: ${name}"
-  fi
-  if [ "${mode}" = "update" ] && [ "${new_name}" != "${name}" ] && [ -e "${destination_file}" ]; then
-    die "peer-forward already exists: ${new_name}"
-  fi
-
-  temporary_file="$(mktemp "${PEER_FORWARD_DIR}/.${new_name}.XXXXXX")"
-  backup_file=""
-  {
-    printf 'PROTOCOL=%s\n' "${protocol}"
-    printf 'SOURCE_ADDRESSES=%s\n' "${source_addresses_text}"
-    printf 'TARGET_ADDRESS=%s\n' "${target_address}"
-    printf 'TARGET_PORT=%s\n' "${target_port}"
-  } >"${temporary_file}"
-
-  if [ -e "${current_file}" ]; then
-    backup_file="$(mktemp "${PEER_FORWARD_DIR}/.${name}.backup.XXXXXX")"
-    cp "${current_file}" "${backup_file}"
-  fi
-  install -o root -g root -m 0600 "${temporary_file}" "${destination_file}"
-  rm -f "${temporary_file}"
-  if [ "${destination_file}" != "${current_file}" ]; then
-    rm -f "${current_file}"
-  fi
-
-  if ! firewall_sync; then
-    log "peer-forward change failed; restoring the previous configuration"
-    if [ -n "${backup_file}" ]; then
-      if [ "${destination_file}" != "${current_file}" ]; then
-        rm -f "${destination_file}"
-      fi
-      install -o root -g root -m 0600 "${backup_file}" "${current_file}"
-    else
-      rm -f "${destination_file}"
-    fi
-    firewall_sync || true
-    rm -f "${backup_file}"
-    die "could not apply peer-forward change"
-  fi
-
-  rm -f "${backup_file}"
-  if [ "${mode}" = "add" ]; then
-    action_label="added"
-  else
-    action_label="updated"
-  fi
-  if [ "${name}" = "${new_name}" ]; then
-    log "${action_label} peer-forward ${name}: ${source_addresses_text:-no sources} -> ${target_address} ${protocol}/${target_port}"
-  else
-    log "${action_label} peer-forward ${name} -> ${new_name}: ${source_addresses_text:-no sources} -> ${target_address} ${protocol}/${target_port}"
-  fi
-}
-
-delete_peer_forward() {
-  local name="$1"
-  local peer_forward_file backup_file
-
-  ensure_initialized
-  validate_name "${name}"
-  peer_forward_file="${PEER_FORWARD_DIR}/${name}.conf"
-  [ -e "${peer_forward_file}" ] || die "peer-forward does not exist: ${name}"
-
-  backup_file="$(mktemp "${PEER_FORWARD_DIR}/.${name}.backup.XXXXXX")"
-  cp "${peer_forward_file}" "${backup_file}"
-  rm -f "${peer_forward_file}"
-
-  if ! firewall_sync; then
-    log "peer-forward deletion failed; restoring the previous configuration"
-    install -o root -g root -m 0600 "${backup_file}" "${peer_forward_file}"
-    firewall_sync || true
-    rm -f "${backup_file}"
-    die "could not delete peer-forward"
-  fi
-
-  rm -f "${backup_file}"
-  log "deleted peer-forward ${name}"
-}
-
 list_peer_forwards() {
   local peer_forward_file name protocol source_addresses target_address target_port
   ensure_initialized
@@ -1271,122 +1099,6 @@ list_peer_forwards() {
   done
 }
 
-render_peer_forward_with_sources() {
-  local source_file="$1"
-  local source_addresses="$2"
-  local output_file="$3"
-  local protocol target_address target_port
-  protocol="$(read_forward_setting PROTOCOL "${source_file}")"
-  target_address="$(read_forward_setting TARGET_ADDRESS "${source_file}")"
-  target_port="$(read_forward_setting TARGET_PORT "${source_file}")"
-  {
-    printf 'PROTOCOL=%s\n' "${protocol}"
-    printf 'SOURCE_ADDRESSES=%s\n' "${source_addresses}"
-    printf 'TARGET_ADDRESS=%s\n' "${target_address}"
-    printf 'TARGET_PORT=%s\n' "${target_port}"
-  } >"${output_file}"
-  chmod 0600 "${output_file}"
-}
-
-assign_peer_forward_source() {
-  local source_address="${1:-}"
-  shift || true
-  local peer_forward_file preset_name desired_name target_address current_sources next_sources current_source
-  local staged_file backup_file
-  local should_assign has_source install_failed=false
-  local -a desired_names=("$@") peer_sources=() changed_files=() staged_files=() backup_files=()
-
-  ensure_initialized
-  [ -n "${source_address}" ] || die "peer-forward assign-source requires SOURCE_IPV4"
-  validate_target_address "${source_address}"
-  ensure_registered_peer_address "${source_address}"
-
-  for preset_name in "${desired_names[@]}"; do
-    validate_name "${preset_name}"
-    peer_forward_file="${PEER_FORWARD_DIR}/${preset_name}.conf"
-    [ -f "${peer_forward_file}" ] || die "peer-forward does not exist: ${preset_name}"
-    target_address="$(read_forward_setting TARGET_ADDRESS "${peer_forward_file}")"
-    [ "${source_address}" != "${target_address}" ] ||
-      die "peer-forward ${preset_name} targets the selected source peer"
-  done
-
-  for peer_forward_file in "${PEER_FORWARD_DIR}"/*.conf; do
-    [ -f "${peer_forward_file}" ] || continue
-    preset_name="$(basename "${peer_forward_file}" .conf)"
-    current_sources="$(read_peer_forward_sources "${peer_forward_file}")"
-    should_assign=false
-    for desired_name in "${desired_names[@]}"; do
-      if [ "${desired_name}" = "${preset_name}" ]; then
-        should_assign=true
-        break
-      fi
-    done
-
-    next_sources=""
-    has_source=false
-    IFS=',' read -r -a peer_sources <<<"${current_sources}"
-    for current_source in "${peer_sources[@]}"; do
-      [ -n "${current_source}" ] || continue
-      if [ "${current_source}" = "${source_address}" ]; then
-        has_source=true
-        ${should_assign} || continue
-      fi
-      if [ -n "${next_sources}" ]; then
-        next_sources="${next_sources},${current_source}"
-      else
-        next_sources="${current_source}"
-      fi
-    done
-    if ${should_assign} && ! ${has_source}; then
-      if [ -n "${next_sources}" ]; then
-        next_sources="${next_sources},${source_address}"
-      else
-        next_sources="${source_address}"
-      fi
-    fi
-    [ "${next_sources}" != "${current_sources}" ] || continue
-
-    staged_file="$(mktemp "${PEER_FORWARD_DIR}/.${preset_name}.staged.XXXXXX")"
-    backup_file="$(mktemp "${PEER_FORWARD_DIR}/.${preset_name}.backup.XXXXXX")"
-    changed_files+=("${peer_forward_file}")
-    staged_files+=("${staged_file}")
-    backup_files+=("${backup_file}")
-    cp "${peer_forward_file}" "${backup_file}"
-    render_peer_forward_with_sources \
-      "${peer_forward_file}" \
-      "${next_sources}" \
-      "${staged_file}"
-  done
-
-  if [ "${#changed_files[@]}" -eq 0 ]; then
-    log "peer-forward assignments already match for ${source_address}"
-    return
-  fi
-
-  local index
-  for index in "${!changed_files[@]}"; do
-    if ! install -o root -g root -m 0600 \
-      "${staged_files[${index}]}" "${changed_files[${index}]}"; then
-      install_failed=true
-      break
-    fi
-  done
-
-  if ${install_failed} || ! firewall_sync; then
-    log "peer-forward assignment failed; restoring the previous configuration"
-    for index in "${!changed_files[@]}"; do
-      install -o root -g root -m 0600 \
-        "${backup_files[${index}]}" "${changed_files[${index}]}" || true
-    done
-    firewall_sync || true
-    rm -f "${staged_files[@]}" "${backup_files[@]}"
-    die "could not apply peer-forward assignments"
-  fi
-
-  rm -f "${staged_files[@]}" "${backup_files[@]}"
-  log "updated peer-forward assignments for ${source_address}: ${desired_names[*]:-none}"
-}
-
 peer_forward_status() {
   list_peer_forwards
   printf '\nFilter rules:\n'
@@ -1397,6 +1109,443 @@ peer_forward_status() {
     grep -F 'peer-forward:' || printf '(not applied)\n'
 }
 
+# Pythonは既存の必須依存。単一スクリプトとして配備するため埋め込む。
+access_policy_engine() {
+  python3 - "${STATE_DIR}" "$@" <<'ACCESS_POLICY_PY'
+"""リレーのロック内で動作するアクセスグループの正本・展開処理。"""
+import base64
+import copy
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+
+class PolicyError(ValueError):
+    pass
+
+
+def name(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}', value):
+        raise PolicyError('名前は1〜32文字の英数字・ハイフン・アンダースコアにしてください。')
+    return value
+
+
+def names(value):
+    if not isinstance(value, list):
+        raise PolicyError('項目一覧は配列にしてください。')
+    return sorted({name(item) for item in value})
+
+
+def read_conf(path):
+    return dict(line.split('=', 1) for line in path.read_text().splitlines()
+                if '=' in line and not line.startswith('#'))
+
+
+def load(root):
+    peers = {}
+    for path in sorted((root / 'peers').glob('*.conf')):
+        conf = read_conf(path)
+        raw = conf.get('AllowedIPs ', conf.get('AllowedIPs', '')).strip()
+        address = next((str(ipaddress.ip_interface(v.strip()).ip)
+                        for v in raw.split(',') if v.strip() and ':' not in v), None)
+        if address:
+            peers[address] = path.stem
+    presets = {}
+    assignments = {address: {'preset_names': [], 'group_names': []} for address in peers}
+    for path in sorted((root / 'peer-forwards').glob('*.conf')):
+        conf = read_conf(path)
+        presets[path.stem] = {'name': path.stem, 'protocol': conf['PROTOCOL'],
+                             'target_address': conf['TARGET_ADDRESS'], 'target_port': int(conf['TARGET_PORT'])}
+        for address in conf.get('SOURCE_ADDRESSES', conf.get('SOURCE_ADDRESS', '')).split(','):
+            if address:
+                if address not in assignments:
+                    raise PolicyError('未登録の接続元Peerが存在します: ' + address)
+                assignments[address]['preset_names'].append(path.stem)
+    policy_file = root / 'access-policy.json'
+    policy = json.loads(policy_file.read_text()) if policy_file.exists() else {
+        'version': 1, 'groups': {}, 'assignments': assignments}
+    if policy.get('version') != 1:
+        raise PolicyError('未対応のアクセスポリシー形式です。')
+    policy = copy.deepcopy(policy)
+    for address in peers:
+        policy['assignments'].setdefault(address, {'preset_names': [], 'group_names': []})
+    # 削除済みPeerの空エントリは意味を持たない。
+    policy['assignments'] = {a: v for a, v in policy['assignments'].items()
+                             if a in peers or v['preset_names'] or v['group_names']}
+    return {'peers': peers, 'presets': presets, **policy}
+
+
+def revision(state):
+    return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def resolve(state):
+    groups, presets = state['groups'], state['presets']
+    # 明示スタックで検査し、Pythonの再帰深度による階層制限を設けない。
+    done = set()
+    for start in groups:
+        stack = [(start, [], False)]
+        active = set()
+        while stack:
+            current, path, leaving = stack.pop()
+            if leaving:
+                active.remove(current)
+                done.add(current)
+                continue
+            if current in active:
+                raise PolicyError('グループが循環しています: ' + ' → '.join(path + [current]))
+            if current in done:
+                continue
+            if current not in groups:
+                raise PolicyError('グループが見つかりません: ' + ' → '.join(path + [current]))
+            active.add(current)
+            group = groups[current]
+            for preset in group['preset_names']:
+                if preset not in presets:
+                    raise PolicyError('プリセットが見つかりません: ' + ' → '.join(path + [current, preset]))
+            stack.append((current, path, True))
+            for child in reversed(group['group_names']):
+                stack.append((child, path + [current], False))
+    effective = {}
+    for address, assignment in state['assignments'].items():
+        if address not in state['peers']:
+            raise PolicyError('割り当て先Peerが見つかりません: ' + address)
+        paths = {}
+        pending = [(p, [p], False) for p in assignment['preset_names']]
+        pending += [(g, [g], True) for g in assignment['group_names']]
+        while pending:
+            item, path, is_group = pending.pop()
+            if is_group:
+                if item not in groups:
+                    raise PolicyError('グループが見つかりません: ' + ' → '.join(path))
+                group = groups[item]
+                pending.extend((p, path + [p], False) for p in group['preset_names'])
+                pending.extend((g, path + [g], True) for g in group['group_names'])
+            else:
+                if item not in presets:
+                    raise PolicyError('プリセットが見つかりません: ' + ' → '.join(path))
+                if presets[item]['target_address'] == address:
+                    raise PolicyError('Peer自身への通信は許可できません: ' + state['peers'][address] + ' → ' + ' → '.join(path))
+                paths.setdefault(item, []).append(path)
+        effective[address] = {p: sorted(routes) for p, routes in sorted(paths.items())}
+    return effective
+
+
+def references(state, kind, item):
+    field = 'group_names' if kind == 'group' else 'preset_names'
+    refs = ['グループ: ' + g for g, v in state['groups'].items() if item in v[field]]
+    refs += ['Peer: ' + state['peers'].get(a, a) for a, v in state['assignments'].items() if item in v[field]]
+    return refs
+
+
+def preset_value(raw, state):
+    if not isinstance(raw, dict):
+        raise PolicyError('プリセットはオブジェクトにしてください。')
+    value = {'name': name(raw.get('name')), 'protocol': str(raw.get('protocol', '')).lower(),
+             'target_address': str(raw.get('target_address', '')), 'target_port': raw.get('target_port')}
+    if value['protocol'] not in ('tcp', 'udp'):
+        raise PolicyError('プロトコルはTCPまたはUDPにしてください。')
+    if value['target_address'] not in state['peers']:
+        raise PolicyError('接続先Peerが見つかりません: ' + value['target_address'])
+    port = value['target_port']
+    if isinstance(port, bool) or not str(port).isdigit() or not 1 <= int(port) <= 65535:
+        raise PolicyError('接続先ポートは1〜65535にしてください。')
+    value['target_port'] = int(port)
+    return value
+
+
+def change(state, request):
+    result = copy.deepcopy(state)
+    action = request.get('action')
+    if action in ('group-create', 'group-update', 'group-delete'):
+        current = name(request.get('current_name', request.get('name')))
+        groups = result['groups']
+        if action == 'group-create' and current in groups:
+            raise PolicyError('同名のグループが存在します: ' + current)
+        if action != 'group-create' and current not in groups:
+            raise PolicyError('グループが見つかりません: ' + current)
+        if action == 'group-delete':
+            refs = references(result, 'group', current)
+            if refs:
+                raise PolicyError('参照中のため削除できません: ' + ', '.join(refs))
+            del groups[current]
+        else:
+            new = name(request.get('name'))
+            if new != current and new in groups:
+                raise PolicyError('同名のグループが存在します: ' + new)
+            additions = request.get('new_presets', [])
+            if not isinstance(additions, list):
+                raise PolicyError('新規プリセット一覧は配列にしてください。')
+            member_presets = names(request.get('preset_names', []))
+            for raw in additions:
+                value = preset_value(raw, result)
+                if value['name'] in result['presets']:
+                    raise PolicyError('同名のプリセットが存在します: ' + value['name'])
+                result['presets'][value['name']] = value
+                member_presets.append(value['name'])
+            groups.pop(current, None)
+            groups[new] = {'preset_names': sorted(set(member_presets)), 'group_names': names(request.get('group_names', []))}
+            if new != current:
+                for value in list(groups.values()) + list(result['assignments'].values()):
+                    value['group_names'] = sorted({new if g == current else g for g in value['group_names']})
+    elif action == 'assign':
+        peer = request.get('peer_name')
+        address = next((a for a, n in result['peers'].items() if n == peer), None)
+        if address is None:
+            raise PolicyError('Peerが見つかりません: ' + str(peer))
+        assignment = result['assignments'][address]
+        assignment['preset_names'] = names(request.get('preset_names'))
+        assignment['group_names'] = names(request.get('group_names', assignment['group_names']))
+    elif action in ('preset-create', 'preset-update', 'preset-delete'):
+        current = name(request.get('current_name', request.get('name')))
+        presets = result['presets']
+        if action == 'preset-create' and current in presets:
+            raise PolicyError('同名のプリセットが存在します: ' + current)
+        if action != 'preset-create' and current not in presets:
+            raise PolicyError('プリセットが見つかりません: ' + current)
+        if action == 'preset-delete':
+            refs = references(result, 'preset', current)
+            if refs:
+                raise PolicyError('参照中のため削除できません: ' + ', '.join(refs))
+            del presets[current]
+        else:
+            value = preset_value(request, result)
+            new = value['name']
+            if new != current and new in presets:
+                raise PolicyError('同名のプリセットが存在します: ' + new)
+            presets.pop(current, None)
+            presets[new] = value
+            for assignment in list(result['groups'].values()) + list(result['assignments'].values()):
+                assignment['preset_names'] = sorted({new if p == current else p for p in assignment['preset_names']})
+            if 'source_addresses' in request:
+                sources = request['source_addresses']
+                if not isinstance(sources, list) or any(a not in result['peers'] for a in sources):
+                    raise PolicyError('接続元Peerが見つかりません。')
+                for address, assignment in result['assignments'].items():
+                    assignment['preset_names'] = sorted((set(assignment['preset_names']) - {new}) | ({new} if address in sources else set()))
+    else:
+        raise PolicyError('未対応の操作です。')
+    resolve(result)
+    return result
+
+
+def snapshot(state):
+    effective = resolve(state)
+    return {'revision': revision(state),
+            'access_groups': [dict(name=n, **v, references=references(state, 'group', n)) for n, v in sorted(state['groups'].items())],
+            'assignments': {state['peers'][a]: dict(**state['assignments'][a], effective_presets=list(paths), access_paths=paths)
+                            for a, paths in effective.items()}}
+
+
+def preview(before, after):
+    old, new = resolve(before), resolve(after)
+    changes = []
+    for address, paths in new.items():
+        def permissions(state, selected):
+            return {json.dumps({k: v for k, v in state['presets'][p].items() if k != 'name'}, sort_keys=True)
+                    for p in selected}
+        previous = permissions(before, old.get(address, {}))
+        following = permissions(after, paths)
+        added, removed = following - previous, previous - following
+        if added or removed:
+            changes.append({'peer_name': after['peers'][address],
+                            'added': [json.loads(v) for v in sorted(added)],
+                            'removed': [json.loads(v) for v in sorted(removed)]})
+    return {'revision': revision(before), 'changes': changes, 'safe': True}
+
+
+def save(root, state):
+    effective = resolve(state)
+    directory = root / 'peer-forwards'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    for path in directory.glob('*.conf'):
+        if path.stem not in state['presets']:
+            path.unlink()
+    for n, preset in state['presets'].items():
+        sources = ','.join(sorted(a for a, paths in effective.items() if n in paths))
+        text = (f"PROTOCOL={preset['protocol']}\nSOURCE_ADDRESSES={sources}\n"
+                f"TARGET_ADDRESS={preset['target_address']}\nTARGET_PORT={preset['target_port']}\n")
+        atomic_write(directory / (n + '.conf'), text)
+    atomic_write(root / 'access-policy.json', json.dumps({k: state[k] for k in ('version', 'groups', 'assignments')}, sort_keys=True) + '\n')
+
+
+def atomic_write(path, text):
+    temporary = path.with_name('.' + path.name + '.policy-tmp')
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def legacy_request(state, args):
+    operation = args[0]
+    if operation == 'assign-source':
+        address = args[1]
+        if address not in state['peers']:
+            raise PolicyError('接続元Peerが見つかりません: ' + address)
+        return {'action': 'assign', 'peer_name': state['peers'][address], 'preset_names': args[2:]}
+    if operation == 'delete':
+        return {'action': 'preset-delete', 'name': args[1]}
+    if operation not in ('add', 'update'):
+        raise PolicyError('未対応の操作です。')
+    request = {'action': 'preset-create' if operation == 'add' else 'preset-update', 'name': args[1], 'current_name': args[1]}
+    sources = []
+    index = 2
+    while index < len(args):
+        flag = args[index]
+        if index + 1 == len(args):
+            raise PolicyError('オプションの値が必要です: ' + flag)
+        value = args[index + 1]
+        if flag == '--source-address':
+            sources.append(value)
+        elif flag in ('--protocol', '--target-address', '--target-port', '--new-name'):
+            if flag == '--new-name' and operation != 'update':
+                raise PolicyError('--new-nameはupdateでのみ使用できます。')
+            request[{'--new-name': 'name'}.get(flag, flag[2:].replace('-', '_'))] = value
+        else:
+            raise PolicyError('未対応のオプションです: ' + flag)
+        index += 2
+    # 既存のupdateは渡されたsource一覧で置換する契約。
+    request['source_addresses'] = sources
+    return request
+
+
+def main():
+    root, operation = Path(sys.argv[1]), sys.argv[2]
+    if operation not in ('state', 'peer-check', 'preview', 'apply', 'check', 'legacy', 'check-legacy'):
+        raise PolicyError('未対応の操作です。')
+    state = load(root)
+    if operation == 'state':
+        output = snapshot(state)
+    elif operation == 'peer-check':
+        assignment = state['assignments'].get(sys.argv[3], {})
+        if assignment.get('preset_names') or assignment.get('group_names'):
+            raise PolicyError('Peerのアクセス割り当てを先に解除してください。')
+        return
+    else:
+        request = legacy_request(state, sys.argv[3:]) if operation in ('legacy', 'check-legacy') else json.loads(base64.b64decode(sys.argv[3], validate=True))
+        if not isinstance(request, dict):
+            raise PolicyError('リクエストはオブジェクトにしてください。')
+        if operation in ('apply', 'check') and request.get('revision') != revision(state):
+            print(json.dumps({'error': 'conflict', 'message': '設定が変更されています。プレビューを更新してください。'}))
+            sys.exit(3)
+        after = change(state, request)
+        output = preview(state, after)
+        if operation in ('apply', 'legacy'):
+            save(root, after)
+            output.update(ok=True, message='アクセス設定を更新しました。')
+    print(json.dumps(output, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, KeyError, TypeError, OSError, IndexError) as error:
+        print(json.dumps({'error': 'apply_failed' if isinstance(error, OSError) else 'validation', 'message': str(error)}, ensure_ascii=False))
+        sys.exit(2)
+ACCESS_POLICY_PY
+}
+
+# 強制終了後の次回コマンド・起動時同期で未完了トランザクションを復元する。
+recover_access_policy() {
+  local backup="${STATE_DIR}/.access-transaction"
+  [ -d "${backup}" ] || return 0
+  if [ ! -f "${backup}/committed" ]; then
+    log "未完了のアクセス設定を復元します。"
+    rm -rf "${PEER_FORWARD_DIR}" &&
+      cp -a "${backup}/peer-forwards" "${PEER_FORWARD_DIR}" ||
+      die "アクセス設定の復元に失敗しました: ${backup}"
+    if [ -f "${backup}/access-policy.json" ]; then
+      cp -a "${backup}/access-policy.json" "${STATE_DIR}/access-policy.json" ||
+        die "アクセスポリシーの復元に失敗しました: ${backup}"
+    else
+      rm -f "${STATE_DIR}/access-policy.json" || die "移行前状態の復元に失敗しました: ${backup}"
+    fi
+    firewall_sync >&2 || die "通信許可の復元に失敗しました: ${backup}"
+  fi
+  rm -rf "${backup}"
+}
+
+# 呼出元がリレーロックを取得済み。失敗・中断時は設定とACLを復元する。
+access_policy_command() (
+  local operation="${1:-state}"
+  shift || true
+  ensure_initialized
+  case "${operation}" in
+    state) [ "$#" -eq 0 ] || die "access-policy state does not accept arguments" ;;
+    preview | apply | peer-check) [ "$#" -eq 1 ] || die "access-policy ${operation} requires one argument" ;;
+  esac
+  if [ "${operation}" = state ] || [ "${operation}" = preview ] || [ "${operation}" = peer-check ]; then
+    access_policy_engine "${operation}" "$@"
+    exit $?
+  fi
+  [ "${operation}" = apply ] || [ "${operation}" = legacy ] || die "unknown access-policy operation"
+  local backup output committed=false
+  local check=check
+  [ "${operation}" != legacy ] || check=check-legacy
+  if output="$(access_policy_engine "${check}" "$@")"; then
+    :
+  else
+    local result=$?
+    printf '%s\n' "${output}"
+    exit "${result}"
+  fi
+  backup="$(mktemp -d "${STATE_DIR}/.access-backup.XXXXXX")"
+  cp -a "${PEER_FORWARD_DIR}" "${backup}/peer-forwards"
+  if [ -f "${STATE_DIR}/access-policy.json" ]; then
+    cp -a "${STATE_DIR}/access-policy.json" "${backup}/access-policy.json"
+  fi
+  mv "${backup}" "${STATE_DIR}/.access-transaction"
+  backup="${STATE_DIR}/.access-transaction"
+  finish_access_policy() {
+    local result=$? failed=false
+    if ! ${committed}; then
+      rm -rf "${PEER_FORWARD_DIR}" || failed=true
+      cp -a "${backup}/peer-forwards" "${PEER_FORWARD_DIR}" || failed=true
+      if [ -f "${backup}/access-policy.json" ]; then
+        cp -a "${backup}/access-policy.json" "${STATE_DIR}/access-policy.json" || failed=true
+      else
+        rm -f "${STATE_DIR}/access-policy.json" || failed=true
+      fi
+      firewall_sync >&2 || failed=true
+      if ${failed}; then
+        log "ERROR: アクセス設定の復元に失敗しました。バックアップ: ${backup}"
+        output="$(python3 - "${backup}" <<'RESTORE_JSON'
+import json, sys
+print(json.dumps({'error': 'partial_failure', 'message': 'アクセス設定の復元に失敗しました。バックアップを確認してください。',
+                  'rollback': 'failed', 'backup': sys.argv[1]}, ensure_ascii=False))
+RESTORE_JSON
+)"
+        result=1
+      fi
+    fi
+    if ! ${failed}; then rm -rf "${backup}"; fi
+    printf '%s\n' "${output}"
+    exit "${result}"
+  }
+  trap finish_access_policy EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if output="$(access_policy_engine "${operation}" "$@")"; then
+    if firewall_sync >&2; then
+      touch "${backup}/committed"
+      committed=true
+    else
+      output='{"error":"apply_failed","message":"通信許可の反映に失敗し、設定とACLを復元しました。","rollback":"restored"}'
+      exit 1
+    fi
+  else
+    local result=$?
+    exit "${result}"
+  fi
+)
+
 peer_forward_command() {
   local operation="${1:-}"
   shift || true
@@ -1404,15 +1553,15 @@ peer_forward_command() {
   case "${operation}" in
     add | update)
       [ "$#" -ge 1 ] || die "peer-forward ${operation} requires NAME"
-      apply_peer_forward "${operation}" "$@"
+      access_policy_command legacy "${operation}" "$@"
       ;;
     delete)
       [ "$#" -eq 1 ] || die "usage: wg-relay peer-forward delete NAME"
-      delete_peer_forward "$1"
+      access_policy_command legacy delete "$1"
       ;;
     assign-source)
       [ "$#" -ge 1 ] || die "usage: wg-relay peer-forward assign-source SOURCE_IPV4 [NAME...]"
-      assign_peer_forward_source "$@"
+      access_policy_command legacy assign-source "$@"
       ;;
     list)
       [ "$#" -eq 0 ] || die "usage: wg-relay peer-forward list"
@@ -1535,7 +1684,7 @@ init_relay() {
 
   render_config
   systemctl enable wg-quick@wg0 >&2
-  systemctl restart wg-quick@wg0
+  relay_systemctl restart wg-quick@wg0
   firewall_sync
   log "initialized relay at ${server_address} and ${server_address_ipv6}, endpoint ${endpoint}, MTU ${mtu}"
   printf '%s\n' "$(tr -d '\r\n' <"${PUBLIC_KEY_FILE}")"
@@ -1570,6 +1719,23 @@ main() {
   require_root
   require_commands
 
+  install -d -m 0700 "${STATE_DIR}" "${PEER_DIR}" "${FORWARD_DIR}" "${PEER_FORWARD_DIR}"
+  if [ "${command_name}" = firewall-sync ] || [ "${command_name}" = firewall-clear ]; then
+    [ "$#" -eq 0 ] || die "firewall commands do not accept arguments"
+    local owner=""
+    if [ -f "${LOCK_FILE}.service-owner" ]; then
+      owner="$(cat "${LOCK_FILE}.service-owner")"
+    fi
+    if [[ "${owner}" =~ ^[0-9]+$ ]] && kill -0 "${owner}" 2>/dev/null; then
+      if [ "${command_name}" = firewall-sync ]; then firewall_sync; else firewall_clear; fi
+      exit 0
+    fi
+  fi
+  exec 9>"${LOCK_FILE}"
+  flock -x 9
+  rm -f "${LOCK_FILE}.service-owner"
+  recover_access_policy
+
   case "${command_name}" in
     firewall-sync)
       [ "$#" -eq 0 ] || die "firewall-sync does not accept arguments"
@@ -1583,9 +1749,6 @@ main() {
       ;;
   esac
 
-  install -d -m 0700 "${STATE_DIR}" "${PEER_DIR}" "${FORWARD_DIR}" "${PEER_FORWARD_DIR}"
-  exec 9>"${LOCK_FILE}"
-  flock -x 9
 
   case "${command_name}" in
     init)
@@ -1629,6 +1792,9 @@ main() {
       ;;
     forward)
       forward_command "$@"
+      ;;
+    access-policy)
+      access_policy_command "$@"
       ;;
     peer-forward)
       peer_forward_command "$@"
